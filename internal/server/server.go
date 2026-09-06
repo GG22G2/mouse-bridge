@@ -17,7 +17,7 @@ import (
 	"mousebridge/internal/win"
 )
 
-const Version = "1.1.0"
+const Version = "1.2.1"
 
 // Server owns the extension connection and serializes mouse operations.
 type Server struct {
@@ -42,6 +42,7 @@ type extConn struct {
 	sendMu  sync.Mutex
 	id      string
 	version string
+	caps    map[string]bool // capabilities declared in hello (nil = pre-caps client)
 	alive   bool
 }
 
@@ -153,7 +154,7 @@ func (s *Server) dispatch(action string, args map[string]any) map[string]any {
 
 	// Everything below touches the physical mouse or the extension; require
 	// the extension for element ops, serialize mouse movement.
-	needExt := strings.HasSuffix(action, "_element") || action == "calibrate"
+	needExt := strings.HasSuffix(action, "_element") || action == "calibrate" || action == "move_css"
 	if needExt && !s.extensionConnected() {
 		return map[string]any{"ok": false, "error": "browser extension not connected. Load the Mouse Bridge extension in Chrome (it reconnects within ~30s)."}
 	}
@@ -218,6 +219,8 @@ func (s *Server) dispatch(action string, args map[string]any) map[string]any {
 		return s.dragViaElements(args)
 	case "calibrate":
 		return s.doCalibrate(args)
+	case "move_css":
+		return s.doMoveCss(args)
 	case "get_calibration":
 		s.calibMu.Lock()
 		defer s.calibMu.Unlock()
@@ -266,7 +269,7 @@ func (s *Server) dispatch(action string, args map[string]any) map[string]any {
 		cx, cy := win.CursorPos()
 		return map[string]any{"ok": true, "cursor": map[string]any{"x": cx, "y": cy}, "note": "raw teleport, not human-like"}
 	default:
-		return errRes("unknown action: " + action + ". Known: status, move, click, wheel, drag, locate_element, move_to_element, click_element, drag_element, calibrate, reset_calibration, get_calibration, move_raw")
+		return errRes("unknown action: " + action + ". Known: status, move, click, wheel, drag, locate_element, move_to_element, click_element, drag_element, calibrate, move_css, reset_calibration, get_calibration, move_raw")
 	}
 }
 

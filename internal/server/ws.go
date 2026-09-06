@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,7 +32,6 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.extConns[c] = struct{}{}
-	s.extLatest = c
 	s.mu.Unlock()
 	log.Printf("[ws] extension connected (%d total)", len(s.extConns))
 
@@ -80,9 +80,16 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		case <-pingTicker.C:
 			s.mu.Lock()
 			c.sendMu.Lock()
-			_ = c.ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
+			err := c.ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
 			c.sendMu.Unlock()
 			s.mu.Unlock()
+			if err != nil {
+				// Dead connection (browser killed, half-open TCP). Without this
+				// the zombie stays in extConns forever and can still be routed
+				// to. Drop it; the extension reconnects on its own.
+				log.Printf("[ws] ping failed (%v) -> dropping dead connection", err)
+				return
+			}
 		}
 	}
 }
@@ -102,7 +109,24 @@ func (s *Server) onExtMessage(c *extConn, msg map[string]any) {
 	case "hello":
 		c.id, _ = msg["ext_id"].(string)
 		c.version, _ = msg["version"].(string)
-		log.Printf("[ws] hello from extension %s v%s (daemon v%s)", c.id, c.version, Version)
+		if caps, ok := msg["caps"].([]any); ok {
+			c.caps = map[string]bool{}
+			for _, cap := range caps {
+				if s2, ok := cap.(string); ok {
+					c.caps[s2] = true
+				}
+			}
+		}
+		log.Printf("[ws] hello from extension %s v%s caps=%v (daemon v%s)", c.id, c.version, c.caps, Version)
+		s.mu.Lock()
+		// Route to the freshest code: a hello with a version >= the current
+		// extLatest's takes over. Mixed-version windows (extension just
+		// reloaded in one browser while another still runs the old one)
+		// therefore converge on the newest instance.
+		if s.extLatest == nil || cmpVersion(c.version, s.extLatest.version) >= 0 {
+			s.extLatest = c
+		}
+		s.mu.Unlock()
 	case "ping":
 		s.sendToExt(c, map[string]any{"type": "pong", "t": time.Now().UnixMilli()})
 	}
@@ -121,7 +145,7 @@ var pendingMu = &sync.Mutex{}
 // the response with the same id.
 func (s *Server) callExt(cmd string, args map[string]any, timeout time.Duration) (map[string]any, error) {
 	s.mu.Lock()
-	c := s.extLatest
+	c := s.pickConn(cmd)
 	if c == nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("no extension connected")
@@ -155,6 +179,45 @@ func (s *Server) extensionConnected() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.extLatest != nil
+}
+
+// pickConn routes cmd to a connection that declared the capability. A conn
+// with caps==nil predates capability declarations (or is mid-handshake) and
+// is trusted by default; a conn WITH caps that lacks the cmd runs stale code
+// and must be routed around when any other conn declared it.
+func (s *Server) pickConn(cmd string) *extConn {
+	if s.extLatest != nil && (s.extLatest.caps == nil || s.extLatest.caps[cmd]) {
+		return s.extLatest
+	}
+	for c := range s.extConns {
+		if c != s.extLatest && c.caps != nil && c.caps[cmd] {
+			log.Printf("[ws] extLatest lacks cap %q -> routing to another capable connection", cmd)
+			return c
+		}
+	}
+	return s.extLatest
+}
+
+// cmpVersion compares dotted numeric versions: -1 / 0 / 1.
+func cmpVersion(a, b string) int {
+	as := strings.Split(a, ".")
+	bs := strings.Split(b, ".")
+	for i := 0; i < 3; i++ {
+		ai, bi := 0, 0
+		if i < len(as) {
+			ai, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			bi, _ = strconv.Atoi(bs[i])
+		}
+		if ai != bi {
+			if ai > bi {
+				return 1
+			}
+			return -1
+		}
+	}
+	return 0
 }
 
 func (s *Server) extensionVersion() string {

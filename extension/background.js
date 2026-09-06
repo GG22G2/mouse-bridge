@@ -23,7 +23,12 @@ function connect() {
   }
   ws.onopen = () => {
     reconnectDelay = 1000;
-    send({ type: 'hello', version: VERSION, ext_id: chrome.runtime.id });
+    send({
+      type: 'hello',
+      version: VERSION,
+      ext_id: chrome.runtime.id,
+      caps: ['ping', 'get_state', 'locate', 'measure', 'measure_page', 'set_zoom', 'set_window'],
+    });
   };
   ws.onmessage = (ev) => {
     let msg;
@@ -45,10 +50,72 @@ function send(obj) {
 
 function scheduleReconnect() {
   if (!wsWantConnected) return;
+  wakeDaemon(); // fire-and-forget: ask the browser to start the daemon if it is down
   const delay = reconnectDelay;
   reconnectDelay = Math.min(reconnectDelay * 2, 30000);
   setTimeout(connect, delay);
 }
+
+// ---------- daemon wake-up (native messaging) ----------
+
+// The daemon (mouse-bridge.exe) is a separate local process; the extension
+// has no process-launching power of its own, so it asks the browser to spawn
+// the registered native messaging host, which starts the daemon detached.
+// Throttled to one attempt per 10s; duplicate spawns are impossible anyway
+// (the daemon's port bind is the single-instance lock).
+const NATIVE_HOST = 'com.mousebridge.daemon';
+let lastWakeAt = 0;
+
+function wakeDaemon(force = false) {
+  return new Promise((resolve) => {
+    const now = Date.now();
+    if (!force && now - lastWakeAt < 10000) return resolve({ ok: false, throttled: true });
+    lastWakeAt = now;
+    let port;
+    let done = false;
+    const finish = (r) => {
+      if (done) return;
+      done = true;
+      try { port && port.disconnect(); } catch {}
+      resolve(r);
+    };
+    try {
+      port = chrome.runtime.connectNative(NATIVE_HOST);
+    } catch (e) {
+      return resolve({ ok: false, error: 'native host not available: ' + String(e) });
+    }
+    port.onMessage.addListener((msg) => {
+      finish(msg || { ok: false });
+      if (msg && msg.ok) {
+        reconnectDelay = 1000; // daemon just came up — reconnect immediately
+        connect();
+      }
+    });
+    port.onDisconnect.addListener(() => {
+      if (!done) finish({ ok: false, error: (chrome.runtime.lastError || {}).message || 'native host exited' });
+    });
+    port.postMessage({ cmd: 'wake' });
+    setTimeout(() => finish({ ok: false, error: 'wake timed out after 15s' }), 15000);
+  });
+}
+
+// Popup panel talks to the service worker here.
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  (async () => {
+    switch (msg && msg.type) {
+      case 'ws_state':
+        return sendResponse({
+          connected: !!(ws && ws.readyState === WebSocket.OPEN),
+          version: VERSION,
+        });
+      case 'wake_daemon':
+        return sendResponse(await wakeDaemon(true));
+      default:
+        return sendResponse({ ok: false, error: 'unknown message: ' + (msg && msg.type) });
+    }
+  })();
+  return true; // async response
+});
 
 // App-level ping keeps the MV3 service worker alive (WS activity extends
 // its lifetime) and lets the daemon report liveness.
@@ -82,6 +149,8 @@ async function handleMessage(msg) {
       return await locate(args);
     case 'measure':
       return await measure(args);
+    case 'measure_page':
+      return await measurePage(args);
     case 'set_zoom':
       return await setZoom(args);
     case 'set_window':
@@ -203,6 +272,41 @@ async function measure(args) {
   const res = await withTimeout(chrome.tabs.sendMessage(tabId, { type: 'measure' }), 3000, 'measure');
   if (!res || !res.ok) throw new Error((res && res.error) || 'measure failed');
   return { ...res, tab_id: tabId, tab_url: (tab.url || '').slice(0, 80) };
+}
+
+// measurePage is locate without an element: page geometry only (no scroll).
+// Used by the daemon's move_css op to convert viewport css coordinates.
+async function measurePage(args) {
+  let tab = await resolveTab(args);
+  const unsupported = /^(chrome|edge|about|devtools|view-source|chrome-extension):/i;
+  if (unsupported.test(tab.url || '')) {
+    throw new Error('cannot measure browser-internal page: ' + tab.url);
+  }
+  const win = await focusTab(tab);
+  await ensureContentScript(tab);
+  tab = await chrome.tabs.get(tab.id); // refresh url/title after activation
+  const res = await withTimeout(
+    chrome.tabs.sendMessage(tab.id, { type: 'measure_page' }),
+    5000,
+    'page measure'
+  );
+  if (!res || !res.ok) throw new Error((res && res.error) || 'measure_page failed in page');
+  const zoom = await chrome.tabs.getZoom(tab.id);
+  lastLocateTabId = tab.id;
+  return {
+    tab: { id: tab.id, url: tab.url, title: tab.title, windowId: tab.windowId },
+    metrics: res.metrics,
+    win: {
+      id: win.id,
+      left: win.left,
+      top: win.top,
+      width: win.width,
+      height: win.height,
+      state: win.state,
+      focused: !!win.focused,
+    },
+    zoom,
+  };
 }
 
 async function setZoom(args) {

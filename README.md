@@ -87,11 +87,37 @@ chrome.exe --pack-extension="...\.mouse-bridge\extension" --pack-extension-key="
 
 ## 使用
 
+### 扩展面板（无需 AI，日常手动使用）
+
+点击浏览器工具栏的 Mouse Bridge 图标弹出面板：
+
+- **连接状态**：守护进程运行/版本、扩展 WS 连接状态；守护进程未运行时提供
+  「启动守护进程」按钮；
+- **页面右下角实时坐标**（开关）：开启后每个页面右下角显示 `css(x,y) dev(x,y)`
+  双坐标（与测试页同款），移动鼠标即刷新，供你读取任意位置的页面坐标；
+- **移动表单**：把读到的 X/Y 填进去点「移动」，守护进程按页面视口 css 坐标
+  换算（走同一套仿射标定）并以拟人轨迹移动真实光标，面板回显页面确认的
+  落点残差。
+
+### 浏览器自动唤醒守护进程（v1.2.1）
+
+不依赖登录自启：扩展检测到 WS 连不上时，通过 **Native Messaging**
+（`com.mousebridge.daemon`，install.ps1 注册到 Edge/Chrome 的 HKCU 注册表）
+让浏览器拉起原生宿主，宿主检查 10087 端口——已运行则直接复用，未运行则
+分离式启动守护进程。防重复机制：wake 先查 `/status` + 端口绑定本身即单实例锁
+（第二个实例绑定失败自动退出）。实测：杀掉守护进程后约 12 秒浏览器自动将其
+唤醒；重复 wake 返回 `already_running:true`，pid 不变。
+
+### 命令
+
 ```bash
 # 元素级（推荐，自动处理 DPI/zoom/前台/校准）
 curl -X POST http://127.0.0.1:10087/command -d '{"action":"click_element","args":{"selector":"#submit","button":"left"}}'
 curl -X POST http://127.0.0.1:10087/command -d '{"action":"drag_element","args":{"from_selector":"#src","to_selector":"#dst"}}'
 curl -X POST http://127.0.0.1:10087/command -d '{"action":"click_element","args":{"selector":"text=立即购买","button":"right"}}'
+
+# 页面视口坐标移动（扩展面板「移动」按钮使用的就是它）
+curl -X POST http://127.0.0.1:10087/command -d '{"action":"move_css","args":{"x":500,"y":300}}'
 
 # 坐标级（物理像素，不经扩展）
 curl -X POST http://127.0.0.1:10087/command -d '{"action":"move","args":{"x":960,"y":540}}'
@@ -150,10 +176,11 @@ PowerShell 独立读数（768,432）= 守护进程坐标（960,540）÷1.25；
 
 ```
 cmd/mouse-bridge/     守护进程入口（start/run/stop/status/restart）
+cmd/nativehost/       Native Messaging 宿主（浏览器唤醒守护进程，防重复）
 internal/win/         Win32 API（SendInput、DPI、窗口管理）
 internal/mouse/       人性化轨迹引擎
 internal/server/      HTTP/WS、坐标换算、校准、编排、测试页
-extension/            MV3 扩展（manifest/background.js/content.js/icons）
+extension/            MV3 扩展（manifest/background.js/content.js/popup 面板/icons）
 extension.pem         CRX 打包签名密钥（保持不变以维持扩展 ID）
 bin/mouse-bridge.exe  成品守护进程（随仓库分发，install.ps1 直接使用）
 extension.crx         打包好的 CRX（配合 pem，ID 恒定）

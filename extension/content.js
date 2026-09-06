@@ -15,9 +15,53 @@
       lastMouse.y = e.clientY;
       lastMouse.t = performance.now();
       window.__mbEventCount = (window.__mbEventCount || 0) + 1;
+      if (overlayEl) renderOverlay();
     },
     { capture: true, passive: true }
   );
+
+  // ---- bottom-right live coordinates overlay (user-toggleable) ----
+  // Mirrors the daemon /test page's position badge: css (what pages see)
+  // plus device px. Pure display, pointer-events:none so it never blocks
+  // the page. Visibility is a global preference in chrome.storage.local,
+  // applied live to every page with this content script.
+  let overlayEl = null;
+  let overlayOn = false;
+
+  function showOverlay() {
+    if (overlayEl) return;
+    overlayEl = document.createElement('div');
+    overlayEl.style.cssText =
+      'position:fixed;right:12px;bottom:12px;z-index:2147483647;' +
+      'background:rgba(0,0,0,.75);color:#0f0;font:12px Consolas,monospace;' +
+      'padding:6px 10px;border-radius:6px;pointer-events:none;white-space:pre;';
+    (document.body || document.documentElement).appendChild(overlayEl);
+    renderOverlay();
+  }
+  function hideOverlay() {
+    if (overlayEl) {
+      overlayEl.remove();
+      overlayEl = null;
+    }
+  }
+  function renderOverlay() {
+    if (!overlayEl) return;
+    const dpr = window.devicePixelRatio || 1;
+    overlayEl.textContent =
+      'css(' + lastMouse.x + ', ' + lastMouse.y + ')  dev(' +
+      Math.round(lastMouse.x * dpr) + ', ' + Math.round(lastMouse.y * dpr) + ')';
+  }
+  chrome.storage.local.get({ overlay: false }, (v) => {
+    overlayOn = !!v.overlay;
+    if (overlayOn) showOverlay();
+  });
+  chrome.storage.onChanged.addListener((ch, area) => {
+    if (area === 'local' && ch.overlay) {
+      overlayOn = !!ch.overlay.newValue;
+      if (overlayOn) showOverlay();
+      else hideOverlay();
+    }
+  });
 
   // ---- selector resolution ----
 
@@ -173,6 +217,25 @@
         case 'ping_cs':
           sendResponse({ ok: true });
           break;
+        case 'measure_page': {
+          // Geometry only — no scrolling, no element interaction. Used by
+          // the daemon to convert viewport css coordinates (panel move form).
+          sendResponse({
+            ok: true,
+            metrics: {
+              dpr: window.devicePixelRatio,
+              innerW: window.innerWidth,
+              innerH: window.innerHeight,
+              outerW: window.outerWidth,
+              outerH: window.outerHeight,
+              screenX: window.screenX,
+              screenY: window.screenY,
+              screenW: screen.width,
+              screenH: screen.height,
+            },
+          });
+          break;
+        }
         case 'locate':
           try {
             sendResponse(await locate(msg.selector));

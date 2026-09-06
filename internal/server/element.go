@@ -719,3 +719,114 @@ func (s *Server) dragViaElements(args map[string]any) map[string]any {
 		"calibration": calib,
 	}
 }
+
+// ---- viewport-css coordinate ops (extension panel) -------------------------
+
+// locatePageOnPage is locateOnPage without an element: it asks the tab for
+// its geometry only (measure_page — no scroll, no element resolution), so
+// viewport-css coordinates can be converted for the panel's move form.
+func (s *Server) locatePageOnPage(args map[string]any) (*locateResult, map[string]any, error) {
+	resp, err := s.callExt("measure_page", map[string]any{
+		"tab_id": args["tab_id"],
+		"url":    args["url"],
+	}, s.extTimeout)
+	if err != nil {
+		return nil, nil, err
+	}
+	if ok, _ := resp["ok"].(bool); !ok {
+		msg, _ := resp["error"].(string)
+		if msg == "" {
+			msg = "extension measure_page failed"
+		}
+		return nil, nil, fmt.Errorf("%s", msg)
+	}
+	raw, _ := resp["data"].(map[string]any)
+	if raw == nil {
+		return nil, nil, fmt.Errorf("extension returned no data")
+	}
+	blob, _ := jsonMarshal(raw)
+	var loc locateResult
+	if err := jsonUnmarshal(blob, &loc); err != nil {
+		return nil, nil, fmt.Errorf("bad measure_page payload: %v", err)
+	}
+	return &loc, raw, nil
+}
+
+// locatePageForMouse mirrors locateForMouse (foreground guarantee + re-measure
+// after raising) for the element-free measure_page locate. Deliberately a
+// copy rather than a refactor of locateForMouse so the existing element path
+// stays byte-identical.
+func (s *Server) locatePageForMouse(args map[string]any) (*locateResult, error) {
+	loc, _, err := s.locatePageOnPage(args)
+	if err != nil {
+		return nil, err
+	}
+	if args["allow_unfocused"] == true {
+		return loc, nil
+	}
+	tabTitle, _ := loc.Tab["title"].(string)
+	hwnd := s.findBrowserHwnd(loc, tabTitle)
+	if hwnd == 0 {
+		return nil, fmt.Errorf("cannot find the browser window (rect %dx%d@%d,%d physical); is it minimized or on another desktop?",
+			int(loc.Win.Width*loc.osScale()), int(loc.Win.Height*loc.osScale()), int(loc.Win.Left*loc.osScale()), int(loc.Win.Top*loc.osScale()))
+	}
+	if !win.IsForeground(hwnd) {
+		if !win.SetForegroundReliably(hwnd) {
+			return nil, fmt.Errorf("could not bring the browser window to the foreground; close overlapping windows or pass allow_unfocused:true to override")
+		}
+		time.Sleep(300 * time.Millisecond)
+		// Re-measure: dpr/zoom may have been captured while the tab was occluded.
+		loc2, _, err2 := s.locatePageOnPage(args)
+		return loc2, err2
+	}
+	return loc, nil
+}
+
+// doMoveCss implements the move_css op: move the real cursor to a viewport
+// CSS coordinate of the target tab (popup panel's X/Y are browser css px,
+// not desktop pixels). Chain: page geometry -> measured affine map ->
+// human-like move -> strict landing verification (page-confirmed residual).
+func (s *Server) doMoveCss(args map[string]any) map[string]any {
+	x, y, ok := num2(args, "x", "y")
+	if !ok {
+		return errRes("move_css needs numeric x,y (viewport CSS pixels of the target tab)")
+	}
+	loc, err := s.locatePageForMouse(args)
+	if err != nil {
+		return errRes(err.Error())
+	}
+	if x < 0 || y < 0 || x > loc.Metrics.InnerW || y > loc.Metrics.InnerH {
+		return errRes(fmt.Sprintf("css point (%.1f,%.1f) is outside the viewport %.0fx%.0f", x, y, loc.Metrics.InnerW, loc.Metrics.InnerH))
+	}
+	fit, calib := s.affineForOp(loc)
+	if fit == nil {
+		return map[string]any{"ok": false, "error": "calibration failed: " + errStr(calib["error"]), "calibration": calib}
+	}
+	px, py := fit.physFromCss(x, y)
+	if res := s.doMove(px, py); res["ok"] != true {
+		return res
+	}
+	out := map[string]any{
+		"ok":         true,
+		"moved":      true,
+		"css_target": map[string]any{"x": x, "y": y},
+		"conversion": map[string]any{
+			"device_pixel_ratio": loc.Metrics.Dpr,
+			"browser_zoom":       loc.Zoom,
+			"os_scale":           loc.osScale(),
+		},
+		"calibration": calib,
+	}
+	obs, verified, _ := s.verifyLanding(loc)
+	if !verified {
+		out["landing_verified"] = false
+		out["error"] = "moved, but the page emitted no mousemove at the target — is the point covered by browser UI?"
+		return out
+	}
+	out["landing_verified"] = true
+	// Residual against the REQUESTED css point (not loc.Css, which for a
+	// measure_page locate carries no target).
+	out["landing_residual_px"] = math.Hypot(obs.X-x, obs.Y-y)
+	out["css_observed"] = obs
+	return out
+}
