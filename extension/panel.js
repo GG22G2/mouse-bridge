@@ -8,6 +8,10 @@
 const $ = (id) => document.getElementById(id);
 const setDot = (id, cls) => { $(id).className = 'dot' + (cls ? ' ' + cls : ''); };
 
+// Same browser brand the service worker reports, so the daemon can route this
+// panel's move request to ITS browser (Chrome and Edge share one extension id).
+const BROWSER = navigator.userAgent.includes('Edg/') ? 'edge' : 'chrome';
+
 let moveBusy = false;
 
 // ---------- connection status ----------
@@ -118,7 +122,7 @@ $('moveform').addEventListener('submit', async (ev) => {
     const r = await fetch('http://127.0.0.1:10087/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'move_css', args: { x, y } }),
+	body: JSON.stringify({ action: 'move_css', args: { x, y, ext_id: chrome.runtime.id + '@' + BROWSER } }),
     });
     const d = await r.json();
     if (d.ok && d.landing_verified) {

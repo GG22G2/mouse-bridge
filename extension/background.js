@@ -4,16 +4,34 @@
 
 const DAEMON_WS = 'ws://127.0.0.1:10087/ws';
 const VERSION = chrome.runtime.getManifest().version;
+// Unpacked installs derive the extension id from the path, so Chrome and Edge
+// share ONE id. The browser brand makes the daemon-side connection identity
+// unique: "id@edge" vs "id@chrome" coexist and are routed independently.
+const BROWSER = navigator.userAgent.includes('Edg/') ? 'edge' : 'chrome';
+const CLIENT = chrome.runtime.id + '@' + BROWSER;
 
-// The toolbar icon opens popup.html, whose script (popup-open.js) immediately
-// hands off to the persistent SIDE PANEL via chrome.sidePanel.open() and
-// closes itself. We deliberately do NOT use
-// sidePanel.setPanelBehavior({openPanelOnActionClick:true}): Edge accepts the
-// flag (which suppresses action.onClicked) but never actually opens the
-// panel, and this Edge build dispatches no action event at all for
-// side-panel extensions — a popup is the one entry that fires everywhere.
-// The side panel itself is also reachable natively: extensions-menu ->
-// "在侧边栏中打开", or right-click the toolbar icon -> "打开边栏" (Edge).
+// The toolbar icon opens the SIDE PANEL directly (persistent, survives focus
+// loss). Two mechanisms cover browser differences: setPanelBehavior is the
+// Chromium-native one-click path; the onClicked -> open() fallback covers
+// builds where the behavior flag is unsupported. Known quirk: some Edge
+// builds dispatch NEITHER (no action events for side-panel extensions) —
+// there the panel opens via the native entries: right-click the toolbar icon
+// -> "打开边栏", or extensions menu -> "在侧边栏中打开", or Alt+Shift+M.
+if (chrome.sidePanel) {
+  chrome.sidePanel
+    .setPanelBehavior({ openPanelOnActionClick: true })
+    .catch(() => {
+      // Behavior unsupported -> the onClicked fallback below takes over.
+    });
+}
+chrome.action.onClicked.addListener(async (tab) => {
+  try {
+    await chrome.sidePanel.setOptions({ tabId: tab.id, path: 'panel.html', enabled: true });
+    await chrome.sidePanel.open({ tabId: tab.id });
+  } catch (e) {
+    console.error('[mb] sidePanel.open failed:', e);
+  }
+});
 
 let ws = null;
 let wsWantConnected = false;
@@ -37,6 +55,7 @@ function connect() {
       type: 'hello',
       version: VERSION,
       ext_id: chrome.runtime.id,
+      browser: BROWSER,
       caps: ['ping', 'get_state', 'locate', 'measure', 'measure_page', 'set_zoom', 'set_window'],
     });
   };
@@ -249,6 +268,7 @@ async function locate(args) {
   const zoom = await chrome.tabs.getZoom(tab.id);
   lastLocateTabId = tab.id;
   return {
+    served_by: CLIENT, // id@browser — daemon routes follow-ups to this exact browser
     tab: { id: tab.id, url: tab.url, title: tab.title, windowId: tab.windowId },
     css: res.css,
     rect: res.rect,
@@ -304,6 +324,7 @@ async function measurePage(args) {
   const zoom = await chrome.tabs.getZoom(tab.id);
   lastLocateTabId = tab.id;
   return {
+    served_by: CLIENT, // id@browser — daemon routes follow-ups to this exact browser
     tab: { id: tab.id, url: tab.url, title: tab.title, windowId: tab.windowId },
     metrics: res.metrics,
     win: {

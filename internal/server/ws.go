@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,7 +29,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[ws] upgrade failed: %v", err)
 		return
 	}
-	c := &extConn{ws: ws, alive: true}
+	c := &extConn{ws: ws, alive: true, since: time.Now()}
 
 	s.mu.Lock()
 	s.extConns[c] = struct{}{}
@@ -38,8 +39,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		s.mu.Lock()
 		delete(s.extConns, c)
-		if s.extLatest == c {
-			s.extLatest = nil
+		c.alive = false
+		if s.lastUsed == c {
+			s.lastUsed = nil
 		}
 		s.mu.Unlock()
 		ws.Close()
@@ -108,6 +110,7 @@ func (s *Server) onExtMessage(c *extConn, msg map[string]any) {
 	switch msg["type"] {
 	case "hello":
 		c.id, _ = msg["ext_id"].(string)
+		c.browser, _ = msg["browser"].(string)
 		c.version, _ = msg["version"].(string)
 		if caps, ok := msg["caps"].([]any); ok {
 			c.caps = map[string]bool{}
@@ -117,15 +120,22 @@ func (s *Server) onExtMessage(c *extConn, msg map[string]any) {
 				}
 			}
 		}
-		log.Printf("[ws] hello from extension %s v%s caps=%v (daemon v%s)", c.id, c.version, c.caps, Version)
+		log.Printf("[ws] hello from extension %s (daemon v%s)", c.identity(), Version)
 		s.mu.Lock()
-		// Route to the freshest code: a hello with a version >= the current
-		// extLatest's takes over. Mixed-version windows (extension just
-		// reloaded in one browser while another still runs the old one)
-		// therefore converge on the newest instance.
-		if s.extLatest == nil || cmpVersion(c.version, s.extLatest.version) >= 0 {
-			s.extLatest = c
+		// Multiple browsers stay connected at once (Chrome AND Edge share one
+		// unpacked extension id — the browser brand keeps them distinct). If
+		// THIS browser's extension reconnects (service worker restart, stale
+		// socket not yet reaped), replace the older socket. The freshest
+		// hello becomes the default route for hint-less commands.
+		for old := range s.extConns {
+			if old != c && old.id == c.id && old.browser == c.browser && c.id != "" {
+				delete(s.extConns, old)
+				old.alive = false
+				old.ws.Close()
+				log.Printf("[ws] replaced stale connection of %s", c.identity())
+			}
 		}
+		s.lastUsed = c
 		s.mu.Unlock()
 	case "ping":
 		s.sendToExt(c, map[string]any{"type": "pong", "t": time.Now().UnixMilli()})
@@ -141,17 +151,48 @@ func (s *Server) sendToExt(c *extConn, msg map[string]any) error {
 
 var pendingMu = &sync.Mutex{}
 
-// callExt sends a command to the latest connected extension and waits for
-// the response with the same id.
+// callExt runs a command on the RIGHT connected extension and waits for the
+// response with the same id. Routing ("who asked,谁的 browser 处理"):
+//   - args.ext_id pins an exact browser (the side panel sends its own id, so a
+//     move requested from Edge's panel moves Edge's page);
+//   - otherwise every capable browser is tried in order — most recently used
+//     first — and a "no such tab here" answer falls through to the next one,
+//     so url/tab_id hints resolve against the browser that actually has the
+//     tab.
 func (s *Server) callExt(cmd string, args map[string]any, timeout time.Duration) (map[string]any, error) {
-	s.mu.Lock()
-	c := s.pickConn(cmd)
-	if c == nil {
-		s.mu.Unlock()
+	candidates := s.routeOrder(cmd, args)
+	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no extension connected")
 	}
-	s.mu.Unlock()
+	var lastErr error
+	for i, c := range candidates {
+		resp, err := s.callOne(c, cmd, args, timeout)
+		if err != nil {
+			// Send failure / timeout: the op may have half-run there — do not
+			// blind-retry the same tab elsewhere; only a clean "not my tab"
+			// answer may fall through.
+			lastErr = err
+			continue
+		}
+		if ok, _ := resp["ok"].(bool); !ok {
+			msg, _ := resp["error"].(string)
+			if tabMiss(msg) && i < len(candidates)-1 {
+				lastErr = fmt.Errorf("%s", msg)
+				continue
+			}
+		}
+		s.mu.Lock()
+		s.lastUsed = c
+		s.mu.Unlock()
+		return resp, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no extension connected")
+}
 
+func (s *Server) callOne(c *extConn, cmd string, args map[string]any, timeout time.Duration) (map[string]any, error) {
 	id := fmt.Sprintf("r%d", time.Now().UnixNano())
 	ch := make(chan map[string]any, 1)
 	pendingMu.Lock()
@@ -175,27 +216,120 @@ func (s *Server) callExt(cmd string, args map[string]any, timeout time.Duration)
 	}
 }
 
+// tabMiss marks responses that mean "this browser cannot serve that tab" and
+// the command should try the next connected browser instead.
+var tabMissPatterns = []string{
+	"no open tab matching url",
+	"no active tab found",
+	"no longer exists",
+	"cannot locate on browser-internal page",
+	"cannot measure browser-internal page",
+	"no window (do a locate first)",
+	"content script not reachable on this page",
+}
+
+func tabMiss(msg string) bool {
+	for _, p := range tabMissPatterns {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// routeOrder returns the candidate connections for cmd, best first: an
+// "id@browser" hint pins one exact browser, a plain id matches every browser
+// carrying that extension (most recently used first), then the most recently
+// used / newest hellos.
+func (s *Server) routeOrder(cmd string, args map[string]any) []*extConn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	capable := func(c *extConn) bool { return c.alive && (c.caps == nil || c.caps[cmd]) }
+	if hint, _ := args["ext_id"].(string); hint != "" {
+		if strings.Contains(hint, "@") {
+			for c := range s.extConns {
+				if c.identity() == hint && capable(c) {
+					return []*extConn{c}
+				}
+			}
+		} else {
+			var m []*extConn
+			for c := range s.extConns {
+				if c.id == hint && capable(c) {
+					m = append(m, c)
+				}
+			}
+			if len(m) > 0 {
+				sort.Slice(m, func(i, j int) bool {
+					if (m[i] == s.lastUsed) != (m[j] == s.lastUsed) {
+						return m[i] == s.lastUsed
+					}
+					return m[i].since.After(m[j].since)
+				})
+				return m
+			}
+		}
+		// Hinted browser not connected (closed?): fall back to normal order.
+	}
+	var list []*extConn
+	for c := range s.extConns {
+		if capable(c) {
+			list = append(list, c)
+		}
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if (list[i] == s.lastUsed) != (list[j] == s.lastUsed) {
+			return list[i] == s.lastUsed
+		}
+		return list[i].since.After(list[j].since)
+	})
+	return list
+}
+
 func (s *Server) extensionConnected() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.extLatest != nil
+	return len(s.extConns) > 0
 }
 
-// pickConn routes cmd to a connection that declared the capability. A conn
-// with caps==nil predates capability declarations (or is mid-handshake) and
-// is trusted by default; a conn WITH caps that lacks the cmd runs stale code
-// and must be routed around when any other conn declared it.
-func (s *Server) pickConn(cmd string) *extConn {
-	if s.extLatest != nil && (s.extLatest.caps == nil || s.extLatest.caps[cmd]) {
-		return s.extLatest
-	}
+func (s *Server) extensionVersion() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	latest := ""
 	for c := range s.extConns {
-		if c != s.extLatest && c.caps != nil && c.caps[cmd] {
-			log.Printf("[ws] extLatest lacks cap %q -> routing to another capable connection", cmd)
-			return c
+		if latest == "" || cmpVersion(c.version, latest) > 0 {
+			latest = c.version
 		}
 	}
-	return s.extLatest
+	return latest
+}
+
+// extensionsInfo describes every connected browser for /status.
+func (s *Server) extensionsInfo() []map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []map[string]any{}
+	for c := range s.extConns {
+		caps := []string{}
+		for k := range c.caps {
+			caps = append(caps, k)
+		}
+		sort.Strings(caps)
+		out = append(out, map[string]any{
+			"ext_id":      c.identity(),
+			"browser":     c.browser,
+			"version":     c.version,
+			"caps":        caps,
+			"connected_s": int(time.Since(c.since).Seconds()),
+			"default":     c == s.lastUsed,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, _ := out[i]["ext_id"].(string)
+		b, _ := out[j]["ext_id"].(string)
+		return a < b
+	})
+	return out
 }
 
 // cmpVersion compares dotted numeric versions: -1 / 0 / 1.
@@ -218,15 +352,6 @@ func cmpVersion(a, b string) int {
 		}
 	}
 	return 0
-}
-
-func (s *Server) extensionVersion() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.extLatest == nil {
-		return ""
-	}
-	return s.extLatest.version
 }
 
 func pidSelf() int { return os.Getpid() }

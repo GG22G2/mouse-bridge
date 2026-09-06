@@ -3,56 +3,137 @@
 <head>
 <meta charset="utf-8">
 <style>
+  :root {
+    --bg: #141a26;
+    --card: #1c2434;
+    --card-border: #2a3550;
+    --text: #e3e9f5;
+    --muted: #8b96ad;
+    --accent: #4a6cf7;
+    --accent-hi: #6b87ff;
+    --ok: #2bb673;
+    --bad: #ff6b64;
+  }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
-  body { width: 100%; min-width: 280px; padding: 12px; font: 13px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; background: #1b2130; color: #dfe5f1; }
-  h1 { font-size: 14px; margin: 0 0 8px; color: #7fd1ff; }
-  .row { display: flex; align-items: center; gap: 8px; margin: 3px 0; flex-wrap: wrap; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: #666; flex: 0 0 auto; }
-  .dot.ok { background: #2bb673; box-shadow: 0 0 6px #2bb67388; }
-  .dot.bad { background: #d9534f; box-shadow: 0 0 6px #d9534f88; }
-  .muted { color: #8a94a8; font-size: 12px; }
-  button { background: #4a6cf7; border: 0; color: #fff; border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
-  button:hover { background: #3a58d8; }
-  button:disabled { background: #555f77; cursor: default; }
-  hr { border: 0; border-top: 1px solid #333d52; margin: 10px 0; }
-  form { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
-  input[type=number] { width: 76px; background: #10141d; color: #dfe5f1; border: 1px solid #3a4560; border-radius: 6px; padding: 6px 8px; font-family: Consolas, monospace; font-size: 14px; }
-  input[type=number]:focus { outline: 1px solid #4a6cf7; }
-  input[type=checkbox] { width: 16px; height: 16px; accent-color: #4a6cf7; }
-  #result { margin-top: 8px; font-size: 12.5px; min-height: 18px; white-space: pre-wrap; }
-  #result.ok { color: #2bb673; }
-  #result.err { color: #ff8a80; }
+  body {
+    width: 100%; min-width: 280px; padding: 0;
+    font: 13px/1.55 "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: #33405e; border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  header {
+    padding: 14px 14px 10px;
+    background: linear-gradient(135deg, #1e2a47 0%, #141a26 100%);
+    border-bottom: 1px solid var(--card-border);
+  }
+  h1 {
+    font-size: 14.5px; margin: 0; color: #7fd1ff;
+    display: flex; align-items: center; gap: 8px; letter-spacing: .2px;
+  }
+  h1 .logo {
+    width: 22px; height: 22px; border-radius: 6px; flex: 0 0 auto;
+    background: #0f1522; border: 1px solid var(--card-border);
+    display: inline-flex; align-items: center; justify-content: center; font-size: 13px;
+  }
+  h1 .muted { font-weight: normal; font-size: 11.5px; }
+
+  main { padding: 12px 14px 16px; }
+  .card {
+    background: var(--card); border: 1px solid var(--card-border);
+    border-radius: 10px; padding: 10px 12px; margin-bottom: 10px;
+  }
+  .card-title {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
+    color: var(--muted); margin: 0 0 6px;
+  }
+  .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; flex-wrap: wrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #5a6478; flex: 0 0 auto; }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 7px #2bb67399; }
+  .dot.bad { background: var(--bad); box-shadow: 0 0 7px #ff6b6499; }
+  .muted { color: var(--muted); font-size: 12px; }
+
+  button {
+    background: var(--accent); border: 0; color: #fff; border-radius: 7px;
+    padding: 7px 13px; font-size: 13px; cursor: pointer;
+    transition: background .12s ease, transform .05s ease;
+  }
+  button:hover { background: var(--accent-hi); }
+  button:active { transform: translateY(1px); }
+  button:disabled { background: #47506b; cursor: default; transform: none; }
+
+  form { display: flex; align-items: center; gap: 8px; margin-top: 2px; flex-wrap: wrap; }
+  label { display: inline-flex; align-items: center; gap: 6px; }
+  input[type=number] {
+    width: 78px; background: #10141d; color: var(--text);
+    border: 1px solid #35415e; border-radius: 7px;
+    padding: 7px 9px; font-family: Consolas, monospace; font-size: 14px;
+  }
+  input[type=number]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px #4a6cf733; }
+  /* 去掉数字输入框的上下调整箭头 */
+  input[type=number]::-webkit-outer-spin-button,
+  input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number] { appearance: textfield; -moz-appearance: textfield; }
+
+  input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+
+  #result {
+    margin-top: 10px; font-size: 12.5px; min-height: 18px; white-space: pre-wrap;
+    padding: 7px 9px; border-radius: 7px; display: none;
+  }
+  #result:not(:empty) { display: block; background: #10141d; border: 1px solid var(--card-border); }
+  #result.ok { color: #52d695; }
+  #result.err { color: #ff8a80; border-color: #5c3038; }
+
+  footer { padding: 0 14px 12px; }
+  footer .muted { font-size: 11px; line-height: 1.5; }
 </style>
 </head>
 <body>
-  <h1>Mouse Bridge <span class="muted" style="font-weight:normal">· 侧栏（不会因失焦关闭）</span></h1>
+  <header>
+    <h1><span class="logo">🖱</span>Mouse Bridge <span class="muted">· 侧栏 · 不随失焦关闭</span></h1>
+  </header>
 
-  <div class="row"><span class="dot" id="dot-daemon"></span><span id="txt-daemon">守护进程：检查中…</span></div>
-  <div class="row"><span class="dot" id="dot-ws"></span><span id="txt-ws">扩展连接：检查中…</span></div>
-  <div class="row" id="row-wake" style="display:none">
-    <button id="btn-wake">启动守护进程</button><span class="muted" id="wake-note"></span>
-  </div>
+  <main>
+    <div class="card">
+      <div class="card-title">连接</div>
+      <div class="row"><span class="dot" id="dot-daemon"></span><span id="txt-daemon">守护进程：检查中…</span></div>
+      <div class="row"><span class="dot" id="dot-ws"></span><span id="txt-ws">扩展连接：检查中…</span></div>
+      <div class="row" id="row-wake" style="display:none">
+        <button id="btn-wake">启动守护进程</button><span class="muted" id="wake-note"></span>
+      </div>
+    </div>
 
-  <hr>
+    <div class="card">
+      <div class="card-title">实时坐标</div>
+      <div class="row">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="ov-toggle">
+          <span>页面右下角实时显示坐标</span>
+        </label>
+      </div>
+      <div class="row muted">开启后移动鼠标，页面右下角实时显示 <b>css(x,y) dev(x,y)</b>（当前页面坐标）。</div>
+    </div>
 
-  <div class="row">
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-      <input type="checkbox" id="ov-toggle">
-      <span>页面右下角实时坐标</span>
-    </label>
-  </div>
-  <div class="row muted">开启后移动鼠标，页面右下角实时显示 <b>css(x,y) dev(x,y)</b>（当前页面坐标）。</div>
+    <div class="card">
+      <div class="card-title">移动光标</div>
+      <form id="moveform">
+        <label>X <input type="number" step="any" id="mx" required></label>
+        <label>Y <input type="number" step="any" id="my" required></label>
+        <button type="submit" id="btn-move">移动</button>
+      </form>
+      <div class="row muted" style="margin-top:7px">输入的是当前页面的视口坐标（css 像素），不是桌面像素。</div>
+    </div>
 
-  <hr>
+    <div id="result"></div>
+  </main>
 
-  <form id="moveform">
-    <label>X <input type="number" step="any" id="mx" required></label>
-    <label>Y <input type="number" step="any" id="my" required></label>
-    <button type="submit" id="btn-move">移动</button>
-  </form>
-  <div class="row muted">输入的是当前页面的视口坐标（css 像素），不是桌面像素。</div>
-  <div id="result"></div>
+  <footer>
+    <div class="muted">Edge 上重新打开侧栏：右键工具栏图标 → 打开边栏；或扩展菜单 → 在侧边栏中打开；快捷键 Alt+Shift+M。</div>
+  </footer>
 
   <script src="panel.js"></script>
 </body>

@@ -17,20 +17,20 @@ import (
 	"mousebridge/internal/win"
 )
 
-const Version = "1.2.1"
+const Version = "1.2.2"
 
-// Server owns the extension connection and serializes mouse operations.
+// Server owns the extension connections and serializes mouse operations.
 type Server struct {
-	mu        sync.Mutex
-	extConns  map[*extConn]struct{}
-	extLatest *extConn
+	mu       sync.Mutex
+	extConns map[*extConn]struct{}
+	lastUsed *extConn // default route for hint-less commands (freshest hello / last served)
 
 	pendingReqs map[string]chan map[string]any
 
 	opMu sync.Mutex // one mouse op at a time
 
-	affine   map[string]*affineFit // geometry key -> measured css↔physical affine map
-	calibMu  sync.Mutex
+	affine  map[string]*affineFit // geometry key -> measured css↔physical affine map
+	calibMu sync.Mutex
 
 	start time.Time
 
@@ -41,10 +41,16 @@ type extConn struct {
 	ws      *websocket.Conn
 	sendMu  sync.Mutex
 	id      string
+	browser string // edge|chrome|"" (pre-brand clients) — same unpacked id runs in both
 	version string
 	caps    map[string]bool // capabilities declared in hello (nil = pre-caps client)
 	alive   bool
+	since   time.Time // connect time (candidate ordering)
 }
+
+// identity is the unique per-browser connection key: unpacked installs share
+// one extension id across Chrome and Edge, the brand disambiguates.
+func (c *extConn) identity() string { return c.id + "@" + c.browser }
 
 // pending response channel for a request id
 type pending struct {
@@ -98,6 +104,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"version":             Version,
 		"extension_connected": s.extensionConnected(),
 		"extension_version":   s.extensionVersion(),
+		"extensions":          s.extensionsInfo(),
 		"cursor":              map[string]any{"x": x, "y": y},
 		"virtual_desktop":     map[string]any{"x": vx, "y": vy, "w": vw, "h": vh},
 		"dpi":                 map[string]any{"system_dpi": win.SystemDpi(), "scale": float64(win.SystemDpi()) / 96.0, "per_monitor_v2": true},
@@ -236,7 +243,7 @@ func (s *Server) dispatch(action string, args map[string]any) map[string]any {
 		return map[string]any{"ok": true, "affine_calibration": out}
 	case "measure":
 		// Debug: raw content-script cursor feedback (freshness + css pos).
-		resp, err := s.callExt("measure", map[string]any{}, s.extTimeout)
+		resp, err := s.callExt("measure", args, s.extTimeout)
 		if err != nil {
 			return errRes("measure: " + err.Error())
 		}
@@ -255,7 +262,11 @@ func (s *Server) dispatch(action string, args map[string]any) map[string]any {
 		if !ok {
 			return errRes("set_zoom needs numeric zoom (e.g. 1.5)")
 		}
-		resp, err := s.callExt("set_zoom", map[string]any{"zoom": z}, s.extTimeout)
+		resp, err := s.callExt("set_zoom", map[string]any{
+			"zoom":   z,
+			"tab_id": args["tab_id"],
+			"ext_id": args["ext_id"],
+		}, s.extTimeout)
 		if err != nil {
 			return errRes("set_zoom: " + err.Error())
 		}

@@ -44,6 +44,10 @@ type locateResult struct {
 	Rect     cssRect        `json:"rect"`
 	Occluded bool           `json:"occluded"`
 	Element  map[string]any `json:"element"`
+	// ServedBy is the extension id (browser) that answered the locate —
+	// follow-up measurements must go to the SAME browser: tab ids are only
+	// unique per browser, two browsers can easily both have tab 123.
+	ServedBy string `json:"served_by"`
 	Metrics  struct {
 		Dpr              float64 `json:"dpr"`
 		InnerW           float64 `json:"innerW"`
@@ -117,6 +121,7 @@ func (s *Server) locateOnPage(args map[string]any) (*locateResult, map[string]an
 		"selector": args["selector"],
 		"tab_id":   args["tab_id"],
 		"url":      args["url"],
+		"ext_id":   args["ext_id"],
 	}, s.extTimeout)
 	if err != nil {
 		return nil, nil, err
@@ -218,10 +223,12 @@ func fitAffine(pairs []probePair, dpr float64) *affineFit {
 	return f
 }
 
-// measureTab asks the located tab where its last real mousemove was.
+// measureTab asks the located tab where its last real mousemove was. Routed
+// to the same browser that answered the locate (tab ids collide across
+// browsers).
 func (s *Server) measureTab(loc *locateResult) (x, y, ageMs, events float64, ok bool) {
 	tabId, _ := loc.Tab["id"].(float64)
-	resp, err := s.callExt("measure", map[string]any{"tab_id": int(tabId)}, 4*time.Second)
+	resp, err := s.callExt("measure", map[string]any{"tab_id": int(tabId), "ext_id": loc.ServedBy}, 4*time.Second)
 	if err != nil {
 		return 0, 0, 0, 0, false
 	}
@@ -272,11 +279,21 @@ func (s *Server) probeCssAt(loc *locateResult, px, py float64) (cssPt, bool) {
 	}
 }
 
-// fitAffineCalibration probes 2 distant corner points + 1 random verification
-// point and fits the per-axis affine map. Every inconsistency aborts with an
-// error instead of storing a bad fit: no mousemove feedback, observed css too
-// far from the aimed css (wrong window), measured slope contradicting
-// 1/devicePixelRatio, or an unstable residual across probes.
+// fitAffineCalibration measures the css↔physical map for the window showing
+// the located tab. v1.2.2 design:
+//
+//   - All probe points sit in the central 30–70% band of the viewport, so a
+//     rough seed that is off by hundreds of pixels (browser side panel docked,
+//     devtools open, odd window chrome) still lands inside the live page.
+//   - The first honest readback immediately calibrates the AIM: css and
+//     physical share the known scale (1 css px = dpr physical px), so ONE
+//     (physical → css) pair pins the offset and every later point is placed
+//     exactly. The seed guess therefore cannot poison the fit.
+//   - A point the page cannot see (covered by browser UI) is re-planned toward
+//     the viewport center and retried — there is always a measurable point.
+//   - The wrong-window guard applies AFTER the correction: a page reporting
+//     far from the corrected aim means the ground moved (window moved, page
+//     navigated) and the fit aborts instead of storing a bad map.
 func (s *Server) fitAffineCalibration(loc *locateResult) (*affineFit, error) {
 	dpr := loc.Metrics.Dpr
 	if dpr <= 0 {
@@ -286,32 +303,76 @@ func (s *Server) fitAffineCalibration(loc *locateResult) (*affineFit, error) {
 	if vw < 120 || vh < 120 {
 		return nil, fmt.Errorf("viewport too small to calibrate (%.0fx%.0f css)", vw, vh)
 	}
-	aims := []cssPt{
-		{X: vw * 0.20, Y: vh * 0.28},
-		{X: vw * 0.80, Y: vh * 0.74},
-		{X: vw * (0.42 + randFrac()*0.16), Y: vh * (0.38 + randFrac()*0.20)},
+
+	var corP, corC [2]float64
+	corrected := false
+	// physAt maps a requested viewport css point to physical pixels: the rough
+	// seed until the first readback, then exact (offset locked by that pair).
+	physAt := func(c cssPt) (float64, float64) {
+		if corrected {
+			return corP[0] + (c.X-corC[0])*dpr, corP[1] + (c.Y-corC[1])*dpr
+		}
+		return loc.physTarget(c)
 	}
-	var pairs []probePair
-	for i, aim := range aims {
-		px, py := loc.physTarget(aim) // rough map only places the probe; readback does the rest
-		c, ok := s.probeCssAt(loc, px, py)
-		if !ok {
-			return nil, fmt.Errorf("probe %d/%d got no mousemove from the page — cursor is not over the live viewport (covered by browser UI? another window on top?)", i+1, len(aims))
-		}
-		if math.Abs(c.X-aim.X) > 150 || math.Abs(c.Y-aim.Y) > 150 {
-			return nil, fmt.Errorf("probe %d: page saw css (%.0f,%.0f) but the probe aimed at (%.0f,%.0f) — wrong window or the page jumped underneath us", i+1, c.X, c.Y, aim.X, aim.Y)
-		}
-		pairs = append(pairs, probePair{P: [2]float64{px, py}, C: [2]float64{c.X, c.Y}})
-		time.Sleep(50 * time.Millisecond)
+	rePlan := func(c cssPt, n int) cssPt { // pull a failing point toward the center
+		k := 0.35 * float64(n)
+		return cssPt{X: c.X + (vw/2-c.X)*k, Y: c.Y + (vh/2-c.Y)*k}
 	}
 
-	// Fit from the two distant pairs, then let the held-out random point
-	// grade the fit; a poor grade pulls it into a 3-point least squares.
-	f := fitAffine(pairs[:2], dpr)
-	gx, gy := f.cssFromPhys(pairs[2].P[0], pairs[2].P[1])
-	if math.Hypot(gx-pairs[2].C[0], gy-pairs[2].C[1]) > 1.0 {
-		f = fitAffine(pairs, dpr)
+	place := func(target cssPt, what string) (probePair, error) {
+		const attempts = 4
+		for n := 0; n < attempts; n++ {
+			t := target
+			if n > 0 {
+				t = rePlan(t, n)
+			}
+			px, py := physAt(t)
+			c, ok := s.probeCssAt(loc, px, py)
+			if !ok {
+				continue // page cannot see this spot (covered by browser UI) — re-plan
+			}
+			if corrected {
+				if math.Abs(c.X-t.X) > 60 || math.Abs(c.Y-t.Y) > 60 {
+					return probePair{}, fmt.Errorf(
+						"%s: page saw css (%.0f,%.0f) but the corrected aim was (%.0f,%.0f) — the window moved or the page jumped underneath us",
+						what, c.X, c.Y, t.X, t.Y)
+				}
+			} else if math.Abs(c.X-t.X) > vw*0.6 || math.Abs(c.Y-t.Y) > vh*0.6 {
+				continue // seed was wildly off — discard this round, re-plan
+			}
+			pair := probePair{P: [2]float64{px, py}, C: [2]float64{c.X, c.Y}}
+			if !corrected {
+				corP, corC = pair.P, pair.C
+				corrected = true
+			}
+			return pair, nil
+		}
+		return probePair{}, fmt.Errorf(
+			"%s: page never reported the cursor after %d placements — the point never lands on the live viewport (covered by browser UI? another window on top?)",
+			what, attempts)
 	}
+
+	p1, err := place(cssPt{X: vw * 0.32, Y: vh * 0.32}, "probe 1")
+	if err != nil {
+		return nil, err
+	}
+	p2, err := place(cssPt{X: vw * 0.68, Y: vh * 0.68}, "probe 2")
+	if err != nil {
+		return nil, err
+	}
+	// Held-out random point inside the central band: it grades the 2-point fit.
+	p3, err := place(cssPt{X: vw * (0.40 + randFrac()*0.18), Y: vh * (0.38 + randFrac()*0.20)}, "probe 3")
+	if err != nil {
+		return nil, err
+	}
+	pairs := []probePair{p1, p2, p3}
+
+	// 3-point least squares: with all points inside the central band the span
+	// is shorter than the old edge-to-edge probes, so a 2-point exact fit
+	// would amplify integer-cursor quantization into slope error. Averaging
+	// three pairs keeps the measured slope tight; the max-residual check below
+	// still catches non-linear garbage (wrong window, mid-fit jump).
+	f := fitAffine(pairs, dpr)
 	f.MaxResidual = 0
 	for _, pr := range pairs {
 		gx, gy := f.cssFromPhys(pr.P[0], pr.P[1])
@@ -729,6 +790,7 @@ func (s *Server) locatePageOnPage(args map[string]any) (*locateResult, map[strin
 	resp, err := s.callExt("measure_page", map[string]any{
 		"tab_id": args["tab_id"],
 		"url":    args["url"],
+		"ext_id": args["ext_id"],
 	}, s.extTimeout)
 	if err != nil {
 		return nil, nil, err
