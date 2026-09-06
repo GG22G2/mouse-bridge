@@ -1,8 +1,9 @@
-// Mouse Bridge — action popup.
-// Shows daemon/extension connection state, the live cursor position in PAGE
-// coordinates (css clientX/Y, exactly what pages see), and lets the user move
-// the real cursor to a css coordinate via the daemon's move_css op (which
-// reuses the measured affine calibration + landing verification).
+// Mouse Bridge — side panel page (opens as a regular tab when loaded directly
+// for diagnostics). Shows daemon/extension connection state, the live cursor
+// position in PAGE coordinates (css clientX/Y, exactly what pages see), and
+// lets the user move the real cursor to a css coordinate via the daemon's
+// move_css op (which reuses the measured affine calibration + landing
+// verification).
 
 const $ = (id) => document.getElementById(id);
 const setDot = (id, cls) => { $(id).className = 'dot' + (cls ? ' ' + cls : ''); };
@@ -139,6 +140,11 @@ function show(cls, text) {
   el.className = cls;
   el.textContent = text;
 }
+
+// Surface side-panel handoff errors (diagnostics for browser differences).
+chrome.storage.local.get({ panelErr: '' }, (v) => {
+  if (v.panelErr) show('err', '侧栏诊断: ' + v.panelErr);
+});
 
 refreshStatus();
 setInterval(refreshStatus, 1500);

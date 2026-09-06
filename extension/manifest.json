@@ -2,12 +2,15 @@
   "manifest_version": 3,
   "name": "Mouse Bridge",
   "description": "Extends Kimi WebBridge with real OS-level mouse control: element location, desktop coordinate mapping (DPI/zoom aware), human-like cursor movement, clicks and drag. Toolbar panel: daemon status, live page coordinates, move-to-css-coordinate.",
-  "version": "1.1.1",
+  "version": "1.1.5",
   "minimum_chrome_version": "116",
-  "permissions": ["tabs", "scripting", "storage", "alarms", "nativeMessaging"],
+  "permissions": ["tabs", "scripting", "storage", "alarms", "nativeMessaging", "sidePanel"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
   },
   "action": {
     "default_title": "Mouse Bridge",

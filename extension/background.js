@@ -5,6 +5,16 @@
 const DAEMON_WS = 'ws://127.0.0.1:10087/ws';
 const VERSION = chrome.runtime.getManifest().version;
 
+// The toolbar icon opens popup.html, whose script (popup-open.js) immediately
+// hands off to the persistent SIDE PANEL via chrome.sidePanel.open() and
+// closes itself. We deliberately do NOT use
+// sidePanel.setPanelBehavior({openPanelOnActionClick:true}): Edge accepts the
+// flag (which suppresses action.onClicked) but never actually opens the
+// panel, and this Edge build dispatches no action event at all for
+// side-panel extensions — a popup is the one entry that fires everywhere.
+// The side panel itself is also reachable natively: extensions-menu ->
+// "在侧边栏中打开", or right-click the toolbar icon -> "打开边栏" (Edge).
+
 let ws = null;
 let wsWantConnected = false;
 let reconnectDelay = 1000;

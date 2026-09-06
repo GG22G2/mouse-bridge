@@ -26,7 +26,7 @@
 </style>
 </head>
 <body>
-  <h1>Mouse Bridge <span class="muted" style="font-weight:normal">· 面板</span></h1>
+  <h1>Mouse Bridge <span class="muted" style="font-weight:normal">· 侧栏（不会因失焦关闭）</span></h1>
 
   <div class="row"><span class="dot" id="dot-daemon"></span><span id="txt-daemon">守护进程：检查中…</span></div>
   <div class="row"><span class="dot" id="dot-ws"></span><span id="txt-ws">扩展连接：检查中…</span></div>
@@ -52,14 +52,8 @@
     <button type="submit" id="btn-move">移动</button>
   </form>
   <div class="row muted">输入的是当前页面的视口坐标（css 像素），不是桌面像素。</div>
-
-  <div class="row" id="row-sidepanel" style="display:none">
-    <button id="btn-sidepanel">在侧栏中打开（不会因失焦关闭）</button>
-  </div>
-  <div class="row muted" id="sidepanel-note" style="display:none"></div>
   <div id="result"></div>
 
   <script src="panel.js"></script>
-  <script src="popup-open.js"></script>
 </body>
 </html>

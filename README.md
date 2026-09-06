@@ -89,7 +89,14 @@ chrome.exe --pack-extension="...\.mouse-bridge\extension" --pack-extension-key="
 
 ### 扩展面板（无需 AI，日常手动使用）
 
-点击浏览器工具栏的 Mouse Bridge 图标弹出面板：
+点击浏览器工具栏的 Mouse Bridge 图标弹出面板，面板会**自动切换成浏览器侧栏**
+（Side Panel，整个右侧区域、不会因失焦而关闭）。浏览器的手势限制可能拦住
+自动切换（Edge 实测：`sidePanel.open() may only be called in response to a
+user gesture`），此时面板里会出现「在侧栏中打开」按钮，点一下即可。侧栏
+还有两个原生入口：扩展菜单（拼图图标）里的「在侧边栏中打开」、工具栏图标
+右键菜单的「打开边栏」（Edge）。
+
+面板功能：
 
 - **连接状态**：守护进程运行/版本、扩展 WS 连接状态；守护进程未运行时提供
   「启动守护进程」按钮；
@@ -180,7 +187,7 @@ cmd/nativehost/       Native Messaging 宿主（浏览器唤醒守护进程，�
 internal/win/         Win32 API（SendInput、DPI、窗口管理）
 internal/mouse/       人性化轨迹引擎
 internal/server/      HTTP/WS、坐标换算、校准、编排、测试页
-extension/            MV3 扩展（manifest/background.js/content.js/popup 面板/icons）
+extension/            MV3 扩展（manifest/background.js/content.js/panel 侧栏/popup 外壳/icons）
 extension.pem         CRX 打包签名密钥（保持不变以维持扩展 ID）
 bin/mouse-bridge.exe  成品守护进程（随仓库分发，install.ps1 直接使用）
 extension.crx         打包好的 CRX（配合 pem，ID 恒定）
