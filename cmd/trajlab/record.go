@@ -102,6 +102,7 @@ func cmdRecord(args []string) {
 	dists := fs.String("dists", "500", "逗号分隔的距离列表 (px)")
 	angles := fs.String("angles", "0", "逗号分隔的方向列表 (度)")
 	count := fs.Int("count", 1, "每个 (距离,方向) 组合录几条")
+	wait := fs.Float64("wait", 30, "每条等待起手的时间 (秒)")
 	dir := fs.String("dir", trajlab.DefaultDir(), "轨迹库目录")
 	fs.Parse(args)
 
@@ -110,6 +111,8 @@ func cmdRecord(args []string) {
 		fmt.Println("距离/方向/次数不能为空")
 		os.Exit(2)
 	}
+	recCfg := trajlab.DefaultRecCfg()
+	recCfg.MaxWaitMs = *wait * 1000
 	ov := NewOverlay()
 	defer ov.Close()
 	ov.Show()
@@ -122,7 +125,7 @@ func cmdRecord(args []string) {
 			for k := 1; k <= *count; k++ {
 				n++
 				title := fmt.Sprintf("录制 %d/%d · %.0fpx @ %.0f° (%s)", n, total, d, a, angleName(a))
-				if ok := runTake(ov, title, d, a, *dir); !ok {
+				if ok := runTake(ov, title, d, a, *dir, recCfg); !ok {
 					failed++
 				}
 			}
@@ -155,7 +158,7 @@ func angleName(a float64) string {
 	}
 }
 
-func runTake(ov *Overlay, title string, dist, angle float64, dir string) bool {
+func runTake(ov *Overlay, title string, dist, angle float64, dir string, recCfg trajlab.RecCfg) bool {
 	start, end, avail, ok := computeRange(dist, angle)
 	if !ok {
 		fmt.Printf("  ✘ %s：屏幕放不下 %.0fpx（该方向最大约 %.0fpx），已跳过\n", title, dist, avail)
@@ -176,7 +179,7 @@ func runTake(ov *Overlay, title string, dist, angle float64, dir string) bool {
 	beep(880, 150)
 	ov.SetState("开始移动！")
 
-	rec := trajlab.NewRecorder(trajlab.DefaultRecCfg())
+	rec := trajlab.NewRecorder(recCfg)
 	done := make(chan struct{})
 	go pollCursor(rec, done)
 	ticker := time.NewTicker(80 * time.Millisecond)
@@ -403,7 +406,7 @@ func cmdSelftest(args []string) {
 		{"终点偏差≤3px", m.EndErr <= 3, fmt.Sprintf("%.2fpx", m.EndErr)},
 		{"时长≥150ms", m.DurationMs >= 150, fmt.Sprintf("%.0fms", m.DurationMs)},
 		{"检出段数≥1", len(m.Segments) >= 1, fmt.Sprintf("%d", len(m.Segments))},
-		{"无跳变≤15000px/s", m.MaxJumpPxS <= 15000, fmt.Sprintf("%.0fpx/s", m.MaxJumpPxS)},
+		{"无跳变≤60000px/s", m.MaxJumpPxS <= 60000, fmt.Sprintf("%.0fpx/s", m.MaxJumpPxS)},
 		{"静止段被裁掉", trim[0].T <= 30, fmt.Sprintf("首样本t=%.0fms", trim[0].T)},
 	}
 	tf := &trajlab.TrajFile{

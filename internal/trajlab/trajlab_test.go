@@ -292,3 +292,44 @@ func TestNoDirectionalSignature(t *testing.T) {
 
 // keep rand import used even if tests above change
 var _ = rand.Float64
+
+// TestRecorderStaircaseOnset guards the injected-motion case: SendInput
+// playback moves the cursor in ~4-11ms steps, so a 1ms poller sees bursts of
+// huge single-sample speeds separated by zero-speed samples. Onset must
+// still fire (no-gap sustained logic), and end detection must not fire
+// mid-motion.
+func TestRecorderStaircaseOnset(t *testing.T) {
+	rec := NewRecorder(DefaultRecCfg())
+	tms := 0.0
+	feed := func(x, y float64) { rec.Feed(x, y, tms); tms += 1 }
+	for i := 0; i < 200; i++ { // 200ms rest at origin
+		feed(0, 0)
+	}
+	for i := 0; i < 400; i++ { // 400ms of staircase motion: +10px every 8ms
+		if i%8 == 7 {
+			feed(float64((i+1)/8)*10, 0)
+		} else {
+			feed(float64((i+1)/8)*10, 0) // position holds between injected steps
+		}
+	}
+	finalX := float64(400 / 8 * 10)
+	for i := 0; i < 900; i++ { // 900ms rest
+		feed(finalX, 0)
+	}
+	if rec.State() != "done" {
+		t.Fatalf("state = %s, want done", rec.State())
+	}
+	trim := rec.Trimmed()
+	if trim == nil {
+		t.Fatal("no trimmed data")
+	}
+	dur := trim[len(trim)-1].T - trim[0].T
+	if dur < 340 || dur > 460 {
+		t.Fatalf("trimmed duration = %.0fms, want ~400", dur)
+	}
+	tgt := [2]float64{finalX, 0}
+	m := ComputeMetrics(trim, &tgt)
+	if m.EndErr > 2 {
+		t.Fatalf("end err = %.2f", m.EndErr)
+	}
+}

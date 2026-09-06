@@ -44,7 +44,7 @@ var (
 	procCreateBrush    = gdi32.NewProc("CreateSolidBrush")
 	procCreatePen      = gdi32.NewProc("CreatePen")
 	procGetStockObject = gdi32.NewProc("GetStockObject")
-	procFillRect       = gdi32.NewProc("FillRect")
+	procFillRect       = user32Ov.NewProc("FillRect")
 	procEllipse        = gdi32.NewProc("Ellipse")
 	procSetTextColor   = gdi32.NewProc("SetTextColor")
 	procSetBkMode      = gdi32.NewProc("SetBkMode")

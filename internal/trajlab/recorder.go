@@ -32,13 +32,14 @@ type Recorder struct {
 	samples             []Sample
 	state               string  // wait | move | rest | done | timeout
 	highSince, lowSince float64 // -1 = not currently sustained
+	lastHighT           float64 // last sample above OnsetPxS (staircase tolerance)
 	highIdx             int     // first sample of the sustained-high run
 	onsetIdx            int
 	restSince           float64
 }
 
 func NewRecorder(cfg RecCfg) *Recorder {
-	return &Recorder{cfg: cfg, state: "wait", highSince: -1, lowSince: -1}
+	return &Recorder{cfg: cfg, state: "wait", highSince: -1, lowSince: -1, lastHighT: -1e9}
 }
 
 func (r *Recorder) State() string { return r.state }
@@ -48,6 +49,10 @@ func (r *Recorder) State() string { return r.state }
 func (r *Recorder) TimedOut() bool { return r.state == "timeout" }
 
 // Feed consumes one cursor sample (tMs = milliseconds since the take began).
+// Onset/end detection tolerates the STAIRCASE nature of injected motion:
+// SendInput moves arrive in ~4-11ms steps, so between steps the cursor is
+// momentarily at rest. "Sustained" therefore means no gap longer than the
+// hold window between qualifying samples, not literally every sample.
 func (r *Recorder) Feed(x, y, tMs float64) {
 	r.samples = append(r.samples, Sample{X: x, Y: y, T: tMs})
 	n := len(r.samples)
@@ -64,17 +69,16 @@ func (r *Recorder) Feed(x, y, tMs float64) {
 	switch r.state {
 	case "wait":
 		if speed >= r.cfg.OnsetPxS {
-			if r.highSince < 0 {
-				r.highSince = tMs
-				r.highIdx = n - 1 // first sample of the sustained-high run
+			if r.highSince < 0 || tMs-r.lastHighT > r.cfg.OnsetMs {
+				r.highSince = tMs // start a new sustained run
+				r.highIdx = n - 1 // first sample of that run
 			}
+			r.lastHighT = tMs
 			if tMs-r.highSince >= r.cfg.OnsetMs {
 				r.state = "move"
 				r.onsetIdx = r.highIdx
 				r.lowSince = -1
 			}
-		} else {
-			r.highSince = -1
 		}
 		if tMs-r.samples[0].T > r.cfg.MaxWaitMs {
 			r.state = "timeout"
@@ -117,14 +121,16 @@ func (r *Recorder) Trimmed() []Sample {
 	if lo < 0 {
 		lo = 0
 	}
-	// Cut the tail where the cursor actually settled (within 0.8px of its
-	// final position), so the slow below-threshold deceleration creep stays
-	// part of the trajectory instead of being mistaken for rest.
+	// Cut the tail back to the last sample where the position actually
+	// changed meaningfully (step > 0.15px): rest/tremor wobble is excluded,
+	// while the final landing step of staircase-like injected motion — and
+	// the human deceleration creep above tremor level — stay part of the
+	// trajectory.
 	hi := len(r.samples) - 1
-	final := r.samples[hi]
 	for hi > r.onsetIdx {
-		dx, dy := r.samples[hi].X-final.X, r.samples[hi].Y-final.Y
-		if dx*dx+dy*dy > 0.64 {
+		dx := r.samples[hi].X - r.samples[hi-1].X
+		dy := r.samples[hi].Y - r.samples[hi-1].Y
+		if dx*dx+dy*dy > 0.0225 { // > 0.15px step
 			break
 		}
 		hi--
