@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -109,51 +110,70 @@ func LoadAll(dir string) ([]*TrajFile, error) {
 	return out, nil
 }
 
-// PickResult is the confidence-based source choice: prefer a REAL human
-// recording whose distance is close enough; only fall back to the synthetic
-// generator when nothing fits.
+// PickTolFrac is how far a requested move may sit from a recording's own
+// chord length and still be served by it: ±10% — a 100px recording serves
+// 90..110 after uniform rescaling.
+const PickTolFrac = 0.10
+
+// dirMatchDeg is the direction window of the preferred pool: when any
+// qualifying recording points within this window of the wanted direction,
+// the random draw is taken from those. Recordings outside the window still
+// qualify (Rescale rotates them onto the wanted angle) but only compete
+// when nothing points the right way.
+const dirMatchDeg = 45
+
+// PickResult is the outcome of matching a wanted distance/direction against
+// the recording library. Traj == nil means nothing fits → synthetic.
 type PickResult struct {
-	File       string
-	Traj       *TrajFile
-	Confidence float64 // 1.0 exact human match … 0.0 nothing fits (use synthetic)
-	Reason     string
+	File   string
+	Traj   *TrajFile
+	Reason string
 }
 
-// Pick selects the best human recording for a wanted distance/direction.
-// tolPx is the distance tolerance (e.g. 30: a real 500px recording serves
-// 470..530 after Rescale). Any recorded direction works — the trajectory is
-// rotated onto the wanted angle — but a matching direction scores better.
-func Pick(files []*TrajFile, wantDist, wantAngle, tolPx float64) PickResult {
-	if tolPx <= 0 {
-		tolPx = 30
-	}
-	var best *TrajFile
-	bestScore := math.Inf(1)
+// Qualifying returns the human recordings whose chord length lies within
+// ±PickTolFrac of wantDist, the tolerance measured against the recording's
+// own length.
+func Qualifying(files []*TrajFile, wantDist float64) []*TrajFile {
+	var out []*TrajFile
 	for _, f := range files {
 		if f.Kind != "human" {
 			continue
 		}
-		dd := math.Abs(f.Dist - wantDist)
-		if dd > tolPx {
-			continue
-		}
-		ang := math.Abs(wrap180(wantAngle - f.AngleDeg))
-		score := dd/tolPx + ang/45 // lower is better
-		if score < bestScore {
-			bestScore, best = score, f
+		if math.Abs(f.Dist-wantDist) <= PickTolFrac*f.Dist {
+			out = append(out, f)
 		}
 	}
-	if best == nil {
-		return PickResult{Confidence: 0, Reason: "库里没有距离匹配的真人轨迹 → 用算法生成"}
+	return out
+}
+
+// Pick draws ONE qualifying recording at random — deliberately not the
+// closest match, so repeated identical requests don't keep replaying the
+// same shape. When any qualifying recording also points within dirMatchDeg
+// of the wanted direction, the draw comes from that pool only; otherwise
+// all qualifying recordings compete and Rescale rotates the winner onto
+// the wanted angle.
+func Pick(files []*TrajFile, wantDist, wantAngle float64) PickResult {
+	qual := Qualifying(files, wantDist)
+	if len(qual) == 0 {
+		return PickResult{Reason: fmt.Sprintf("库里没有 %.0f~%.0fpx 的真人轨迹 → 用算法生成",
+			wantDist/(1+PickTolFrac), wantDist/(1-PickTolFrac))}
 	}
-	dd := math.Abs(best.Dist - wantDist)
-	ang := math.Abs(wrap180(wantAngle - best.AngleDeg))
-	conf := 1 - 0.5*(dd/tolPx) - 0.2*math.Min(1, ang/45)
-	if conf < 0.3 {
-		conf = 0.3
+	pool := qual
+	angled := make([]*TrajFile, 0, len(qual))
+	for _, f := range qual {
+		if math.Abs(wrap180(wantAngle-f.AngleDeg)) <= dirMatchDeg {
+			angled = append(angled, f)
+		}
 	}
+	if len(angled) > 0 {
+		pool = angled
+	}
+	f := pool[rand.Intn(len(pool))]
+	dd := math.Abs(f.Dist - wantDist)
+	ang := math.Abs(wrap180(wantAngle - f.AngleDeg))
 	return PickResult{
-		File: best.File, Traj: best, Confidence: conf,
-		Reason: fmt.Sprintf("真人轨迹 偏距 %.0fpx 偏向 %.0f°", dd, ang),
+		File: f.File, Traj: f,
+		Reason: fmt.Sprintf("真人轨迹 %s（%.0fpx@%.0f°，等比缩放 %.3f×，偏距 %.0fpx 偏向 %.0f°）",
+			filepath.Base(f.File), f.Dist, f.AngleDeg, wantDist/f.Dist, dd, ang),
 	}
 }

@@ -17,7 +17,7 @@ import (
 	"mousebridge/internal/win"
 )
 
-const Version = "1.2.3"
+const Version = "1.2.4"
 
 // Server owns the extension connections and serializes mouse operations.
 type Server struct {
@@ -235,9 +235,9 @@ func (s *Server) dispatch(action string, args map[string]any) map[string]any {
 		for k, f := range s.affine {
 			out[k] = map[string]any{
 				"sx": f.SX, "sy": f.SY, "tx": f.TX, "ty": f.TY,
-				"probes":         len(f.Pairs),
+				"probes":          len(f.Pairs),
 				"max_residual_px": f.MaxResidual,
-				"age_s":          int(time.Since(f.FittedAt).Seconds()),
+				"age_s":           int(time.Since(f.FittedAt).Seconds()),
 			}
 		}
 		return map[string]any{"ok": true, "affine_calibration": out}
@@ -284,8 +284,8 @@ func (s *Server) dispatch(action string, args map[string]any) map[string]any {
 	}
 }
 
-func errRes(msg string) map[string]any   { return map[string]any{"ok": false, "error": msg} }
-func ms(d time.Duration) int64           { return d.Milliseconds() }
+func errRes(msg string) map[string]any { return map[string]any{"ok": false, "error": msg} }
+func ms(d time.Duration) int64         { return d.Milliseconds() }
 func strOr(m map[string]any, k, def string) string {
 	if v, ok := m[k].(string); ok && v != "" {
 		return v
@@ -313,14 +313,16 @@ func (s *Server) doMove(x, y float64) map[string]any {
 		return errRes(fmt.Sprintf("target (%.0f,%.0f) outside virtual desktop %dx%d at (%d,%d)", x, y, vw, vh, vx, vy))
 	}
 	cx, cy := win.CursorPos()
-	pts, dur := mouse.Move(x, y)
+	pts, dur, src := mouse.Move(x, y)
 	ex, ey := win.CursorPos()
+	log.Printf("[move] %s (%d,%d)->(%d,%d) %dms %dpts", src, cx, cy, ex, ey, ms(dur), len(pts))
 	return map[string]any{
 		"ok":          true,
 		"from":        map[string]any{"x": cx, "y": cy},
 		"to":          map[string]any{"x": ex, "y": ey},
 		"duration_ms": ms(dur),
 		"path_points": len(pts),
+		"source":      src,
 	}
 }
 

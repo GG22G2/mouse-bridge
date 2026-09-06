@@ -67,8 +67,8 @@ func usage() {
   record    录制真人轨迹（屏幕覆盖层提示起点/终点，自动起止）
             -dists 500,600  -angles 0,90  -count 3  -dir <库目录>
   list      浏览轨迹库
-  pick      按距离/方向挑选真人轨迹（含置信度），没有则回退算法生成
-            -dist 500 -angle 0 -tol 30
+  pick      按距离/方向从真人库里随机挑一条（±10% 距离内都算合格，方向对得上的优先）
+            -dist 500 -angle 0
   replay    回放一条轨迹（可重标定距离/方向/起点）
             -file <json> 或 -dist 500 -angle 0；-to-dist/-to-angle/-start
   selftest  用引擎自身驱动光标，端到端自检录制器（会移动真实鼠标！）
@@ -214,7 +214,6 @@ func cmdPick(args []string) {
 	fs := flag.NewFlagSet("pick", flag.ExitOnError)
 	dist := fs.Float64("dist", 0, "想要的移动距离 (px)")
 	angle := fs.Float64("angle", 0, "想要的方向 (度)")
-	tol := fs.Float64("tol", 30, "距离容差 (px)")
 	dir := fs.String("dir", trajlab.DefaultDir(), "轨迹库目录")
 	fs.Parse(args)
 	files, err := trajlab.LoadAll(*dir)
@@ -222,12 +221,12 @@ func cmdPick(args []string) {
 		fmt.Println("读取轨迹库失败:", err)
 		os.Exit(1)
 	}
-	got := trajlab.Pick(files, *dist, *angle, *tol)
+	got := trajlab.Pick(files, *dist, *angle)
 	if got.Traj == nil {
-		fmt.Printf("%.0fpx@%.0f°: %s (置信度 0)\n", *dist, *angle, got.Reason)
+		fmt.Printf("%.0fpx@%.0f°: %s\n", *dist, *angle, got.Reason)
 		return
 	}
-	fmt.Printf("%.0fpx@%.0f° → %s\n  置信度 %.2f (%s)\n", *dist, *angle, baseName(got.File), got.Confidence, got.Reason)
+	fmt.Printf("%.0fpx@%.0f° → %s\n  %s\n", *dist, *angle, baseName(got.File), got.Reason)
 }
 
 func baseName(p string) string {

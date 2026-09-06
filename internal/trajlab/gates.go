@@ -31,14 +31,18 @@ type CellReport struct {
 	FailReps   int            `json:"fail_reps"`
 	FailCounts map[string]int `json:"fail_counts,omitempty"`
 
-	ArcChordMin, ArcChordMax   float64 `json:"arc_chord_min_max"`
-	MaxSegLateralRatio         float64 `json:"max_seg_lateral_ratio"`
-	PeakRatioMin, PeakRatioMax float64 `json:"peak_ratio_min_max"`
-	T2PMin, T2PMax             float64 `json:"t2p_min_max"`
-	DurRatioMin, DurRatioMax   float64 `json:"dur_ratio_min_max"`
-	MeanAsym                   float64 `json:"mean_asymmetry"`
-	FracRightBulge             float64 `json:"frac_right_bulge"`
-	MaxJumpPxS                 float64 `json:"max_jump_pxs"`
+	ArcChordMin        float64 `json:"arc_chord_min"`
+	ArcChordMax        float64 `json:"arc_chord_max"`
+	MaxSegLateralRatio float64 `json:"max_seg_lateral_ratio"`
+	PeakRatioMin       float64 `json:"peak_ratio_min"`
+	PeakRatioMax       float64 `json:"peak_ratio_max"`
+	T2PMin             float64 `json:"t2p_min"`
+	T2PMax             float64 `json:"t2p_max"`
+	DurRatioMin        float64 `json:"dur_ratio_min"`
+	DurRatioMax        float64 `json:"dur_ratio_max"`
+	MeanAsym           float64 `json:"mean_asymmetry"`
+	FracRightBulge     float64 `json:"frac_right_bulge"`
+	MaxJumpPxS         float64 `json:"max_jump_pxs"`
 }
 
 // MatrixReport is the full acceptance run.

@@ -247,7 +247,6 @@ func cmdReplay(args []string) {
 	file := fs.String("file", "", "轨迹 JSON 文件")
 	dist := fs.Float64("dist", 0, "按距离/方向从库里挑（-file 的替代）")
 	angle := fs.Float64("angle", 0, "方向（配合 -dist）")
-	tol := fs.Float64("tol", 30, "挑选容差 (px)")
 	dir := fs.String("dir", trajlab.DefaultDir(), "轨迹库目录")
 	toDist := fs.Float64("to-dist", -1, "重标定的距离 (默认=原距离)")
 	toAngle := fs.Float64("to-angle", -1, "重标定的方向 (默认=原方向)")
@@ -268,12 +267,12 @@ func cmdReplay(args []string) {
 			fmt.Println("读取轨迹库失败:", err)
 			os.Exit(1)
 		}
-		got := trajlab.Pick(files, *dist, *angle, *tol)
+		got := trajlab.Pick(files, *dist, *angle)
 		if got.Traj == nil {
 			fmt.Println("库里没有匹配的真人轨迹:", got.Reason)
 			os.Exit(1)
 		}
-		fmt.Printf("选中 %s（置信度 %.2f，%s）\n", baseName(got.File), got.Confidence, got.Reason)
+		fmt.Printf("选中 %s（%s）\n", baseName(got.File), got.Reason)
 		traj = got.Traj
 	}
 

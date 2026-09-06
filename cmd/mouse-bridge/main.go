@@ -14,7 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"mousebridge/internal/mouse"
 	"mousebridge/internal/server"
+	"mousebridge/internal/trajlab"
 	"mousebridge/internal/win"
 )
 
@@ -120,13 +122,29 @@ func main() {
 	case "run":
 		f, err := setupLogging()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "logging setup failed:", err)
+			fmt.Fprintf(os.Stderr, "logging setup failed: %v\n", err)
 			os.Exit(1)
 		}
 		defer f.Close()
 		writePid()
 		defer removePid()
 		log.Printf("[main] mouse-bridge daemon v%s starting (pid %d)", server.Version, os.Getpid())
+		// Recorded human trajectories get first claim on every move; the
+		// synthetic generator stays as the fallback (and the only source on
+		// machines with an empty library).
+		lib := trajlab.NewLibrary(trajlab.DefaultDir())
+		mouse.HumanPathHook = func(from, to mouse.Point) ([]mouse.Sample, string, bool) {
+			pts, src, ok := lib.HumanPath(from.X, from.Y, to.X, to.Y)
+			if !ok {
+				return nil, "", false
+			}
+			out := make([]mouse.Sample, len(pts))
+			for i, p := range pts {
+				out[i] = mouse.Sample{X: p.X, Y: p.Y, T: p.T}
+			}
+			return out, src, true
+		}
+		log.Printf("[main] trajectory library %s (%d recordings)", lib.Dir(), lib.Size())
 		s := server.New()
 		if err := s.Run(listenAddr); err != nil {
 			log.Printf("[main] server exited: %v", err)

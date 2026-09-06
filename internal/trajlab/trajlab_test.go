@@ -197,22 +197,26 @@ func TestStoreSaveLoadPick(t *testing.T) {
 	if len(files) != 4 {
 		t.Fatalf("loaded %d files, want 4", len(files))
 	}
-	// 500@0 wanted → prefer exact direction & distance
-	got := Pick(files, 500, 0, 30)
-	if got.Traj == nil || math.Abs(got.Traj.Dist-500) > 3 || math.Abs(got.Traj.AngleDeg-0) > 1 {
-		t.Fatalf("picked %+v, want 500@0", got)
+	// ±10% of the recording's own length qualifies: 500@0, 500@90, 502@0 all
+	// serve a 500px want; the 600px one does not (100 > 60).
+	if q := Qualifying(files, 500); len(q) != 3 {
+		t.Fatalf("Qualifying(500) = %d files, want 3", len(q))
 	}
-	if got.Confidence < 0.9 {
-		t.Fatalf("confidence = %.2f, want high", got.Confidence)
+	if q := Qualifying(files, 2000); len(q) != 0 {
+		t.Fatalf("Qualifying(2000) = %d files, want 0", len(q))
 	}
-	// different direction preferred when wanted
-	got = Pick(files, 500, 90, 30)
+	// wanted direction filters the random pool when it can
+	got := Pick(files, 500, 0)
+	if got.Traj == nil || math.Abs(got.Traj.AngleDeg-0) > 45 {
+		t.Fatalf("picked %+v, want a ~0° recording", got)
+	}
+	got = Pick(files, 500, 90)
 	if got.Traj == nil || math.Abs(got.Traj.AngleDeg-90) > 1 {
 		t.Fatalf("picked %+v, want 500@90", got)
 	}
 	// out of tolerance → synthetic fallback
-	got = Pick(files, 2000, 0, 30)
-	if got.Traj != nil || got.Confidence != 0 {
+	got = Pick(files, 2000, 0)
+	if got.Traj != nil {
 		t.Fatalf("expected synthetic fallback, got %+v", got)
 	}
 	// sequence naming: same (dist,angle) must not collide
@@ -331,5 +335,108 @@ func TestRecorderStaircaseOnset(t *testing.T) {
 	m := ComputeMetrics(trim, &tgt)
 	if m.EndErr > 2 {
 		t.Fatalf("end err = %.2f", m.EndErr)
+	}
+}
+
+// mkFile builds a minimal in-memory recording: straight line, min-jerk-ish
+// timing is unnecessary here — only chord/angle/points matter for picking.
+func mkFile(dist, angle float64) *TrajFile {
+	rad := angle * math.Pi / 180
+	pts := straightConst(500, 400, 500+dist*math.Cos(rad), 400+dist*math.Sin(rad), dist, 60)
+	return &TrajFile{
+		Kind: "human", Dist: dist, AngleDeg: angle,
+		Start:  [2]float64{pts[0].X, pts[0].Y},
+		End:    [2]float64{pts[len(pts)-1].X, pts[len(pts)-1].Y},
+		Points: pts,
+	}
+}
+
+func TestPickToleranceBoundaries(t *testing.T) {
+	files := []*TrajFile{mkFile(100, 0), mkFile(105, 0)}
+	// a 100px recording serves exactly 90..110 (±10% of its own length)
+	if q := Qualifying(files, 110); len(q) != 2 {
+		t.Fatalf("want 110 within both recordings, got %d", len(q))
+	}
+	if q := Qualifying(files, 110.1); len(q) != 1 {
+		t.Fatalf("want 110.1 outside the 100px recording, got %d", len(q))
+	}
+	if q := Qualifying(files, 90); len(q) != 1 {
+		t.Fatalf("want 90 within the 100px recording only, got %d", len(q))
+	}
+	if q := Qualifying(files, 89.9); len(q) != 0 {
+		t.Fatalf("want 89.9 outside both recordings, got %d", len(q))
+	}
+}
+
+func TestPickRandomAmongQualifying(t *testing.T) {
+	// need 105: both the 100px and the 105px recordings qualify — the draw
+	// must be random, not an exact-match shortcut. Over 60 draws both files
+	// must appear (P(miss) = 2·2⁻⁶⁰).
+	files := []*TrajFile{mkFile(100, 0), mkFile(105, 0)}
+	seen := map[float64]bool{}
+	for i := 0; i < 60; i++ {
+		got := Pick(files, 105, 0)
+		if got.Traj == nil {
+			t.Fatal("no pick despite qualifying recordings")
+		}
+		seen[got.Traj.Dist] = true
+	}
+	if !seen[100] || !seen[105] {
+		t.Fatalf("random draw never used both candidates: %v", seen)
+	}
+}
+
+func TestPickPrefersDirection(t *testing.T) {
+	files := []*TrajFile{mkFile(500, 0), mkFile(500, 270)}
+	// a rightward want must always draw from the rightward recording
+	for i := 0; i < 40; i++ {
+		if got := Pick(files, 500, 0); math.Abs(got.Traj.AngleDeg) > 1 {
+			t.Fatalf("pick %d: got %.0f°, want 0° pool only", i, got.Traj.AngleDeg)
+		}
+	}
+	// 180° matches nothing within 45° — pool opens up, both must appear
+	seen := map[float64]bool{}
+	for i := 0; i < 60; i++ {
+		seen[Pick(files, 500, 180).Traj.AngleDeg] = true
+	}
+	if !seen[0] || !seen[270] {
+		t.Fatalf("no direction match should open the whole pool: %v", seen)
+	}
+}
+
+func TestRescaleRealRecordings(t *testing.T) {
+	files, err := LoadAll("../../trajectories")
+	if err != nil || len(files) == 0 {
+		t.Skip("repo trajectory library not present")
+	}
+	for _, f := range files {
+		// the stored Dist/AngleDeg must really be the chord/angle of the
+		// points — Rescale relies on that to land the endpoint exactly
+		chord := math.Hypot(f.End[0]-f.Start[0], f.End[1]-f.Start[1])
+		if math.Abs(chord-f.Dist) > 0.5*f.Dist/100 {
+			t.Errorf("%s: stored dist %.1f vs point chord %.1f", f.File, f.Dist, chord)
+			continue
+		}
+		newDist := f.Dist * 1.07
+		newAng := wrap180(f.AngleDeg + 30)
+		rad := newAng * math.Pi / 180
+		start := [2]float64{300, 300}
+		wantEnd := [2]float64{300 + newDist*math.Cos(rad), 300 + newDist*math.Sin(rad)}
+		pts := Rescale(f, start, newDist, newAng)
+		if len(pts) != len(f.Points) {
+			t.Errorf("%s: rescale changed point count %d → %d", f.File, len(f.Points), len(pts))
+			continue
+		}
+		last := pts[len(pts)-1]
+		if math.Hypot(last.X-wantEnd[0], last.Y-wantEnd[1]) > 0.01 {
+			t.Errorf("%s: rescaled endpoint (%.2f,%.2f), want (%.2f,%.2f)",
+				f.File, last.X, last.Y, wantEnd[0], wantEnd[1])
+		}
+		for i := range pts {
+			if pts[i].T != f.Points[i].T {
+				t.Errorf("%s: rescale moved timestamps", f.File)
+				break
+			}
+		}
 	}
 }

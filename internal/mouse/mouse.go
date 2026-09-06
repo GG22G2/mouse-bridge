@@ -25,6 +25,24 @@ type Sample struct {
 	X, Y, T float64
 }
 
+// HumanPathHook, when set, offers a recorded human trajectory for a move.
+// Implementations return the full path already mapped onto from→to (T in ms
+// since start); ok=false makes the movement fall back to the synthetic
+// generator. Wired to the recording library by cmd/mouse-bridge.
+var HumanPathHook func(from, to Point) (samples []Sample, source string, ok bool)
+
+// tryHumanPath consults HumanPathHook; a nil hook or a too-short answer
+// means the synthetic generator takes over.
+func tryHumanPath(from, to Point) ([]Sample, string, bool) {
+	if HumanPathHook == nil {
+		return nil, "synthetic", false
+	}
+	if samps, src, ok := HumanPathHook(from, to); ok && len(samps) > 1 {
+		return samps, src, true
+	}
+	return nil, "synthetic", false
+}
+
 func clamp(v, lo, hi float64) float64 {
 	if v < lo {
 		return lo
@@ -264,13 +282,44 @@ func DebugPathTimed(from, to Point) ([]Sample, int, time.Duration) {
 	return emit(from, subs, total), len(subs), total
 }
 
-// moveTo drives the cursor from its current position to target.
-func moveTo(target Point, minDur, maxDur time.Duration, pauseChance float64) ([]Point, time.Duration) {
+// playTimed plays pre-sampled points on their recorded clock (T in ms since
+// start) instead of a fixed per-step sleep — the pacing IS the recorded
+// hand's pacing.
+func playTimed(points []Sample) time.Duration {
+	t0 := time.Now()
+	for _, p := range points {
+		deadline := t0.Add(time.Duration(p.T * float64(time.Millisecond)))
+		for {
+			d := time.Until(deadline)
+			if d <= 0 {
+				break
+			}
+			if d > 2*time.Millisecond {
+				time.Sleep(2 * time.Millisecond)
+			} else {
+				time.Sleep(d)
+			}
+		}
+		win.MoveToAbsolute(int(math.Round(p.X)), int(math.Round(p.Y)))
+	}
+	return time.Since(t0)
+}
+
+// moveTo drives the cursor from its current position to target. Recorded
+// human trajectories have first claim (when the library holds one within
+// tolerance); the synthetic sub-movement generator is the fallback.
+func moveTo(target Point, minDur, maxDur time.Duration, pauseChance float64) ([]Point, time.Duration, string) {
 	cx, cy := win.CursorPos()
 	from := Point{float64(cx), float64(cy)}
 	if math.Hypot(target.X-from.X, target.Y-from.Y) < 1.5 {
 		win.MoveToAbsolute(int(math.Round(target.X)), int(math.Round(target.Y)))
-		return []Point{target}, 5 * time.Millisecond
+		return []Point{target}, 5 * time.Millisecond, "synthetic"
+	}
+	if samps, src, ok := tryHumanPath(from, target); ok {
+		dur := playTimed(samps)
+		// Land exactly on the requested pixel.
+		win.MoveToAbsolute(int(math.Round(target.X)), int(math.Round(target.Y)))
+		return ptsOf(samps), dur, "human:" + src
 	}
 	subs, dur := plan(from, target, false)
 	if dur < minDur {
@@ -305,16 +354,18 @@ func moveTo(target Point, minDur, maxDur time.Duration, pauseChance float64) ([]
 	}
 	// Land exactly on the requested pixel.
 	win.MoveToAbsolute(int(math.Round(target.X)), int(math.Round(target.Y)))
-	return pts, total
+	return pts, total, "synthetic"
 }
 
 // Move glides the cursor to a physical desktop coordinate like a person.
-func Move(x, y float64) ([]Point, time.Duration) {
+// The returned source names where the path came from: "human:<file>" for a
+// replayed recording, "synthetic" for the generated fallback.
+func Move(x, y float64) ([]Point, time.Duration, string) {
 	return moveTo(Point{x, y}, 100*time.Millisecond, 1100*time.Millisecond, 0.015)
 }
 
 // Nudge is a short corrective glide (calibration corrections).
-func Nudge(x, y float64) ([]Point, time.Duration) {
+func Nudge(x, y float64) ([]Point, time.Duration, string) {
 	return moveTo(Point{x, y}, 60*time.Millisecond, 240*time.Millisecond, 0)
 }
 
