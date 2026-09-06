@@ -19,6 +19,12 @@ type Point struct {
 	X, Y float64
 }
 
+// Sample is one sampled path point: position in physical pixels, T in
+// milliseconds since the movement started.
+type Sample struct {
+	X, Y, T float64
+}
+
 func clamp(v, lo, hi float64) float64 {
 	if v < lo {
 		return lo
@@ -61,18 +67,28 @@ func plan(from, to Point, grip bool) ([]subMove, time.Duration) {
 	px, py := -uy, ux          // unit perpendicular
 
 	// Fitts-like duration: MT = a + b·log2(1 + D/100), randomized ±20%.
-	durMs := 150 + 130*math.Log2(1+dist/100)
+	durMs := FittsMs(dist)
 	durMs *= 0.8 + rand.Float64()*0.45
 	dur := time.Duration(clamp(durMs, 110, 1300) * float64(time.Millisecond))
 
-	// Choose the number of sub-movements.
+	// Choose the number of sub-movements. Waypoints sit on the travel axis
+	// with a purely perpendicular offset whose SIGN is random — a fixed side
+	// would stamp every movement with the same curvature signature.
+	off := func(lo, hi float64) float64 {
+		v := randn(lo, hi)
+		if rand.Float64() < 0.5 {
+			v = -v
+		}
+		return v
+	}
 	var subs []subMove
 	switch {
 	case dist < 70 || grip:
 		subs = []subMove{{End: to, durFrac: 1}}
 	case dist < 420 || rand.Float64() < 0.4:
 		f := 0.72 + rand.Float64()*0.18 // first swing covers 72-90%
-		mid := Point{from.X + ux*dist*f + px*randn(1, 5), from.Y + uy*dist*f + py*randn(1, 5)}
+		o := off(1, 5)
+		mid := Point{from.X + ux*dist*f + px*o, from.Y + uy*dist*f + py*o}
 		subs = []subMove{
 			{End: mid, durFrac: 0.55 + rand.Float64()*0.15},
 			{End: to, durFrac: 1},
@@ -81,8 +97,10 @@ func plan(from, to Point, grip bool) ([]subMove, time.Duration) {
 	default:
 		f1 := 0.55 + rand.Float64()*0.2
 		f2 := f1 + (0.8-f1)*(0.6+rand.Float64()*0.3)
-		mid1 := Point{from.X + ux*dist*f1 + px*randn(2, 7), from.Y + uy*dist*f1 + py*randn(2, 7)}
-		mid2 := Point{from.X + ux*dist*f2 + px*randn(1, 4), from.Y + uy*dist*f2 + py*randn(1, 4)}
+		o1 := off(2, 7)
+		o2 := off(1, 4)
+		mid1 := Point{from.X + ux*dist*f1 + px*o1, from.Y + uy*dist*f1 + py*o1}
+		mid2 := Point{from.X + ux*dist*f2 + px*o2, from.Y + uy*dist*f2 + py*o2}
 		subs = []subMove{
 			{End: mid1, durFrac: 0.45 + rand.Float64()*0.1},
 			{End: mid2, durFrac: 0.75},
@@ -90,29 +108,15 @@ func plan(from, to Point, grip bool) ([]subMove, time.Duration) {
 		}
 	}
 
-	// Normalize duration fractions and decorate each sub-move.
+	// Normalize duration fractions; the first sub-movement of a long travel
+	// gets the lion's share of time.
 	var acc float64
 	for i := range subs {
 		acc += subs[i].durFrac
 	}
 	for i := range subs {
 		subs[i].durFrac /= acc
-		sd := dist * subs[i].durFrac // rough sub-move length for scaling
-		// Bow: some sub-moves nearly straight, others up to ~12% hump.
-		if rand.Float64() < 0.3 {
-			subs[i].bow = randn(0, 1.5)
-		} else {
-			b := sd * (0.03 + rand.Float64()*0.09) * sign(rand.Float64()-0.5)
-			subs[i].bow = clamp(b, -60, 60)
-		}
-		subs[i].wPh1 = rand.Float64() * math.Pi * 2
-		subs[i].wF1 = 0.8 + rand.Float64()*0.9
-		subs[i].wA1 = clamp(sd*0.015, 0.4, 4) * (0.5 + rand.Float64())
-		subs[i].wPh2 = rand.Float64() * math.Pi * 2
-		subs[i].wF2 = 2.5 + rand.Float64()*1.6
-		subs[i].wA2 = clamp(sd*0.006, 0.2, 1.6)
 	}
-	// First sub-movement of a long travel gets the lion's share of time.
 	if len(subs) > 1 {
 		subs[0].durFrac = clamp(subs[0].durFrac, 0.5, 0.72)
 		rest := 1 - subs[0].durFrac
@@ -124,8 +128,42 @@ func plan(from, to Point, grip bool) ([]subMove, time.Duration) {
 			subs[i].durFrac = subs[i].durFrac / restAcc * rest
 		}
 	}
+
+	// Decorate each sub-move. The lateral bow and the wander amplitude must
+	// scale with the segment's ACTUAL chord length (straight-line distance
+	// between its endpoints), not with its share of the total time — after
+	// the clamp above the two diverge badly (a ~90px corrective segment can
+	// inherit the decoration scale of a ~350px swing and draw a visible hook
+	// through the slow zone).
+	prev := from
+	for i := range subs {
+		sd := math.Hypot(subs[i].End.X-prev.X, subs[i].End.Y-prev.Y)
+		prev = subs[i].End
+		// Bow: the initial swing may hump up to ~12% of its chord; corrective
+		// segments stay more direct (3-8%) — humans home in nearly straight.
+		factor := 0.03 + rand.Float64()*0.09
+		if i > 0 {
+			factor = 0.02 + rand.Float64()*0.05
+		}
+		if rand.Float64() < 0.3 {
+			subs[i].bow = (rand.Float64()*2 - 1) * 1.5
+		} else {
+			b := sd * factor * sign(rand.Float64()-0.5)
+			subs[i].bow = clamp(b, -60, 60)
+		}
+		subs[i].wPh1 = rand.Float64() * math.Pi * 2
+		subs[i].wF1 = 0.8 + rand.Float64()*0.9
+		subs[i].wA1 = clamp(sd*0.015, 0.4, 4) * (0.5 + rand.Float64())
+		subs[i].wPh2 = rand.Float64() * math.Pi * 2
+		subs[i].wF2 = 2.5 + rand.Float64()*1.6
+		subs[i].wA2 = clamp(sd*0.006, 0.2, 1.6)
+	}
 	return subs, dur
 }
+
+// FittsMs is the core duration model before randomization and clamps:
+// MT = 150 + 130·log2(1 + D/100) ms.
+func FittsMs(dist float64) float64 { return 150 + 130*math.Log2(1+dist/100) }
 
 func randn(lo, hi float64) float64 { return lo + rand.Float64()*(hi-lo) }
 func sign(v float64) float64 {
@@ -138,8 +176,8 @@ func sign(v float64) float64 {
 // emit samples the planned path time-driven (uneven 5-13ms intervals),
 // producing the physical points the cursor will visit. Contains low-frequency
 // wander plus AR(1) tremor — deliberately NOT a smooth analytic curve.
-func emit(from Point, subs []subMove, total time.Duration) []Point {
-	out := make([]Point, 0, 128)
+func emit(from Point, subs []subMove, total time.Duration) []Sample {
+	out := make([]Sample, 0, 128)
 	trem := 0.0 // AR(1) tremor state (px)
 	totalSec := total.Seconds()
 	t := 0.0
@@ -153,9 +191,13 @@ func emit(from Point, subs []subMove, total time.Duration) []Point {
 			bx := start.X + (sm.End.X-start.X)*s
 			by := start.Y + (sm.End.Y-start.Y)*s
 			hump := math.Sin(math.Pi * clamp(s, 0, 1))
-			wander := sm.bow*hump +
+			// The whole lateral offset (bow + wander) rides the hump
+			// envelope so it vanishes at both segment ends — without that,
+			// independent per-segment wander phases jump the path sideways
+			// at every junction.
+			wander := (sm.bow +
 				sm.wA1*math.Sin(sm.wPh1+2*math.Pi*sm.wF1*u) +
-				sm.wA2*math.Sin(sm.wPh2+2*math.Pi*sm.wF2*u)
+				sm.wA2*math.Sin(sm.wPh2+2*math.Pi*sm.wF2*u)) * hump
 			// perpendicular of THIS sub-move
 			sdx, sdy := sm.End.X-start.X, sm.End.Y-start.Y
 			l := math.Hypot(sdx, sdy)
@@ -166,18 +208,27 @@ func emit(from Point, subs []subMove, total time.Duration) []Point {
 			trem = trem*0.72 + (rand.Float64()-0.5)*0.55
 			jx := px*wander + px*trem*0.6 + (rand.Float64()-0.5)*0.3
 			jy := py*wander + py*trem*0.6 + (rand.Float64()-0.5)*0.3
-			out = append(out, Point{X: bx + jx, Y: by + jy})
+			out = append(out, Sample{X: bx + jx, Y: by + jy, T: (t + st) * 1000})
 			st += (5 + rand.Float64()*8) / 1000 // uneven 5-13ms sampling
 		}
 		start = sm.End
 		t += subDur
-		_ = t
 	}
-	out = append(out, subs[len(subs)-1].End)
+	last := subs[len(subs)-1].End
+	out = append(out, Sample{X: last.X, Y: last.Y, T: t * 1000})
 	return out
 }
 
-func play(points []Point) {
+// ptsOf strips timestamps for callers that only need the path geometry.
+func ptsOf(samps []Sample) []Point {
+	out := make([]Point, len(samps))
+	for i, p := range samps {
+		out[i] = Point{X: p.X, Y: p.Y}
+	}
+	return out
+}
+
+func play(points []Sample) {
 	if len(points) == 0 {
 		return
 	}
@@ -188,7 +239,7 @@ func play(points []Point) {
 }
 
 // playWithPauses plays the path, occasionally hesitating like a human.
-func playWithPauses(points []Point, pauseChance float64) {
+func playWithPauses(points []Sample, pauseChance float64) {
 	for _, p := range points {
 		win.MoveToAbsolute(int(math.Round(p.X)), int(math.Round(p.Y)))
 		time.Sleep(time.Duration(4+rand.Float64()*7) * time.Millisecond)
@@ -201,6 +252,14 @@ func playWithPauses(points []Point, pauseChance float64) {
 // Plan is exported for diagnostics (tools/pathdump): plan + sample a path
 // WITHOUT touching the real cursor, for inspecting the velocity profile.
 func DebugPath(from, to Point) (pts []Point, subMoves int, dur time.Duration) {
+	subs, total := plan(from, to, false)
+	return ptsOf(emit(from, subs, total)), len(subs), total
+}
+
+// DebugPathTimed is DebugPath with per-sample timestamps kept (ms since
+// start). The trajectory test bench (cmd/trajlab) runs its acceptance gates
+// on this. Never touches the real cursor.
+func DebugPathTimed(from, to Point) ([]Sample, int, time.Duration) {
 	subs, total := plan(from, to, false)
 	return emit(from, subs, total), len(subs), total
 }
@@ -232,15 +291,16 @@ func moveTo(target Point, minDur, maxDur time.Duration, pauseChance float64) ([]
 		dur = time.Duration(float64(dur) * 0.9)
 	}
 
-	pts := emit(from, subs, dur)
-	playWithPauses(pts, pauseChance)
+	samps := emit(from, subs, dur)
+	playWithPauses(samps, pauseChance)
 	total := dur
+	pts := ptsOf(samps)
 
 	if corr {
 		cSubs, cDur := plan(aim, target, true)
-		cPts := emit(aim, cSubs, cDur)
-		play(cPts)
-		pts = append(pts, cPts...)
+		cSamps := emit(aim, cSubs, cDur)
+		play(cSamps)
+		pts = append(pts, ptsOf(cSamps)...)
 		total += cDur
 	}
 	// Land exactly on the requested pixel.
@@ -301,9 +361,9 @@ func Drag(to Point, btn string) ([]Point, time.Duration) {
 	dur := time.Duration(clamp(durMs, 220, 2600) * float64(time.Millisecond))
 
 	subs, _ := plan(from, to, true)
-	pts := emit(from, subs, dur)
+	samps := emit(from, subs, dur)
 	start := time.Now()
-	for _, p := range pts {
+	for _, p := range samps {
 		win.MoveToAbsolute(int(math.Round(p.X)), int(math.Round(p.Y)))
 		time.Sleep(time.Duration(5+rand.Float64()*8) * time.Millisecond)
 		if rand.Float64() < 0.04 {
@@ -313,7 +373,7 @@ func Drag(to Point, btn string) ([]Point, time.Duration) {
 	win.MoveToAbsolute(int(math.Round(to.X)), int(math.Round(to.Y)))
 	time.Sleep(time.Duration(80+rand.Intn(120)) * time.Millisecond)
 	if err := win.ButtonUp(btn); err != nil {
-		return pts, time.Since(start)
+		return ptsOf(samps), time.Since(start)
 	}
-	return pts, time.Since(start)
+	return ptsOf(samps), time.Since(start)
 }

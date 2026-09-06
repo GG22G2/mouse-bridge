@@ -127,6 +127,34 @@ Chrome 和 Edge 可以**同时**连着守护进程，互不挤占。路由规则
 `move_css 100,100` 落点残差 ≤2 css px（整数光标量化下限），拟合残差
 0.45px，测量斜率 0.797/0.803（理论 0.8）。
 
+### 轨迹引擎 v1.2.3：弦长定标 + 轨迹实验室（trajlab）
+
+人性化轨迹引擎经全矩阵验收平台（`cmd/trajlab`，纯 Go、不依赖浏览器）审查修正：
+
+- **弦长定标**：弓形/游走幅度改用每段实际弦长（修前用时间占比，慢速矫正段的
+  弓形被放大 3 倍，视觉上是"钩子"）；
+- **带符号偏移**：路径点偏移改为符号随机（修前恒为一侧，是机器签名）；
+- **游走连续**：侧向偏移乘 `sin(πs)` 包络，段交界处不再侧跳；
+- **矫正段更直**（2–7% vs 首段 3–12%），符合"矫正子运动接近直线"的文献。
+
+验收：23 档距离（10~2200px）× 8 方向 × 24 次 = 4416 条路径，**0 条失败**
+（修前小矩阵 65/120 失败）。详见
+[docs/trajectory-audit-v1.2.3.md](docs/trajectory-audit-v1.2.3.md)。
+
+轨迹实验室常用命令（详见 `trajlab` 无参数输出）：
+
+```bash
+bin/trajlab.exe analyze                      # 生成算法验收矩阵（纯计算，不碰光标）
+bin/trajlab.exe record -dists 500,600 -angles 0,90 -count 3   # 录真人轨迹（屏幕提示+自动起止）
+bin/trajlab.exe list                         # 浏览轨迹库
+bin/trajlab.exe pick -dist 500 -angle 0      # 按距离/方向挑真人轨迹（置信度），没有则算法兜底
+bin/trajlab.exe replay -dist 500 -angle 0    # 按真人轨迹回放（可重标定距离/方向/起点）
+bin/trajlab.exe selftest                     # 引擎驱动光标自检录制链路（会动真实鼠标）
+```
+
+真人轨迹库在固定目录 `~/.mouse-bridge/trajectories`（一轨迹一 JSON，整文件夹可
+拷贝到其他机器）。建议按 50px 网格录制；±30px 内优先回放真人轨迹，超出则算法生成。
+
 ### 浏览器自动唤醒守护进程（v1.2.1）
 
 不依赖登录自启：扩展检测到 WS 连不上时，通过 **Native Messaging**
@@ -205,14 +233,18 @@ PowerShell 独立读数（768,432）= 守护进程坐标（960,540）÷1.25；
 ```
 cmd/mouse-bridge/     守护进程入口（start/run/stop/status/restart）
 cmd/nativehost/       Native Messaging 宿主（浏览器唤醒守护进程，防重复）
+cmd/trajlab/          轨迹实验室 CLI（验收矩阵/真人录制/回放/置信度选择）
 internal/win/         Win32 API（SendInput、DPI、窗口管理）
 internal/mouse/       人性化轨迹引擎
+internal/trajlab/     轨迹指标、验收门禁、轨迹库、录制状态机（纯逻辑）
 internal/server/      HTTP/WS、坐标换算、校准、编排、测试页
 extension/            MV3 扩展（manifest/background.js/content.js/panel 侧栏/icons）
 extension.pem         CRX 打包签名密钥（保持不变以维持扩展 ID）
 bin/mouse-bridge.exe  成品守护进程（随仓库分发，install.ps1 直接使用）
+bin/trajlab.exe       成品轨迹实验室（随仓库分发）
 extension.crx         打包好的 CRX（配合 pem，ID 恒定）
 install.ps1           新电脑一键安装（复制成品+扩展、启动 daemon）
 tools/run-tests.mjs   全链路测试套件（52 断言）
 tools/cdp.mjs 等      调试辅助（CDP/服务Worker 求值、启用扩展、图标生成）
+docs/                 审查报告（trajectory-audit-v1.2.3.md + 验收矩阵原始数据）
 ```

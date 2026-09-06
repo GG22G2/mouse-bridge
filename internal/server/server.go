@@ -17,7 +17,7 @@ import (
 	"mousebridge/internal/win"
 )
 
-const Version = "1.2.2"
+const Version = "1.2.3"
 
 // Server owns the extension connections and serializes mouse operations.
 type Server struct {
